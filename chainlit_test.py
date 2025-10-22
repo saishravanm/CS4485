@@ -19,7 +19,7 @@ def search_web(query: str) -> str:
     """
     params ={
         "q":query,
-        "api_key":"f31233afdea256c2f97c5063768c34bf297cdbf58976f4cefe40330a5d27bc1d"
+        "api_key":""
     }
     results = serpapi.search(params).get_dict()
     top_result = results['organic_results'][0]['snippet']
@@ -34,8 +34,8 @@ def init():
     dynamodb = boto3.resource("dynamodb", region_name=region_name)
     client = boto3.client(
         'sts',
-        aws_access_key_id='AKIA3PZEYYKFHBZD2YUP',
-        aws_secret_access_key='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',
+        aws_access_key_id='',
+        aws_secret_access_key='',
         region_name=region_name
     )
 
@@ -43,8 +43,8 @@ def init():
     model = ChatBedrockConverse(
         model_id="amazon.nova-micro-v1:0",
         region_name=region_name,
-        aws_access_key_id="AKIA3PZEYYKFHBZD2YUP",
-        aws_secret_access_key="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"
+        aws_access_key_id="",
+        aws_secret_access_key=""
     )
     output_parser = StrOutputParser()
     internet_tool = Tool(
