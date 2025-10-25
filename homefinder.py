@@ -2,32 +2,29 @@ import chainlit as cl
 import uuid
 import boto3
 from langchain_aws import ChatBedrockConverse
-import serpapi
 import os
-from langchain_core.tools import Tool
 from langchain_core.output_parsers import StrOutputParser
 from langchain_tavily import TavilySearch
-from langchain_classic.memory import ConversationBufferMemory
-from langchain_classic.agents import initialize_agent, AgentType, create_tool_calling_agent, AgentExecutor
+from langchain_classic.agents import create_tool_calling_agent, AgentExecutor
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 from langchain_core.runnables.history import RunnableWithMessageHistory
 from langchain_community.chat_message_histories import DynamoDBChatMessageHistory
 from dotenv import load_dotenv
 
 def get_session_history(session_id):
-    return DynamoDBChatMessageHistory(table_name="SessionTable",session_id=session_id)
+    # Create boto3 session with credentials
+    session = boto3.Session(
+        aws_access_key_id=os.getenv("AWS_ACCESS_KEY_ID"),
+        aws_secret_access_key=os.getenv("AWS_SECRET_ACCESS_KEY"),
+        region_name="us-east-1"
+    )
+    return DynamoDBChatMessageHistory(
+        table_name="SessionTable",
+        session_id=session_id,
+        boto3_session=session
+    )
 
-def search_web(query: str) -> str:
-    """
-    This function searches the web.
-    """
-    params ={
-        "q":query,
-        "api_key":os.getenv("SERPAPI_KEY")
-    }
-    results = serpapi.search(params).as_dict()
-    top_result = results['organic_results'][0]['snippet']
-    return top_result
+# SerpAPI function removed - now using TavilySearch
 
 @cl.on_chat_start
 def init():
@@ -48,41 +45,51 @@ def init():
         region_name=region_name
     )
 
-# Create the Bedrock model instance
-    model = ChatBedrockConverse(
-        model_id="amazon.nova-micro-v1:0",
+# Create Bedrock client first
+    bedrock_client = boto3.client(
+        service_name="bedrock-runtime",
         region_name=region_name,
         aws_access_key_id=os.getenv("AWS_ACCESS_KEY_ID"),
         aws_secret_access_key=os.getenv("AWS_SECRET_ACCESS_KEY"),
     )
+
+# Create the Bedrock model instance
+    model = ChatBedrockConverse(
+        model_id="amazon.nova-micro-v1:0",
+        client=bedrock_client,
+        region_name=region_name,
+    )
     
     tools = []
-    history = DynamoDBChatMessageHistory(table_name="SessionTable", session_id=session_id)
+    # Create boto3 session with credentials
+    session = boto3.Session(
+        aws_access_key_id=os.getenv("AWS_ACCESS_KEY_ID"),
+        aws_secret_access_key=os.getenv("AWS_SECRET_ACCESS_KEY"),
+        region_name=region_name
+    )
+    history = DynamoDBChatMessageHistory(
+        table_name="SessionTable",
+        session_id=session_id,
+        boto3_session=session
+    )
 
 ##define tools
+    # Use TavilySearch for web search
     search_tool = TavilySearch(
             max_results=5,
             topic="general",
     )
 
-
-    internet_tool = Tool(
-            name="internet",
-            func=search_web,
-            description="Use this to search for current information on the internet"
-    )
-
 #append created tools to list
-    tools.append(internet_tool)
+    tools.append(search_tool)
 
-#define parser and memory
+#define parser
     output_parser = StrOutputParser()
-    memory = ConversationBufferMemory(chat_memory=history,memory_key="history",return_messages=True)
 
-#define agentic prompt
+#define agentic prompt - simplified and more conversational
     agent_prompt = ChatPromptTemplate.from_messages(
             [
-                ("system", "You are a very empathetic chatbot that has access to the internet and is running on a device of some kind (usually a phone) (name: \"HomeFinder\") which helps individuals who are homeless find the resources they need. Specifically, findShelter, findID, findMentalHealth, findPhysicalHealth, findStorage. You have a tool that lets you search the internet. You must answer ALL of the user's queries as empathetically as possible. If additional information is necessary to more precisely help the user find their resource, ask for it, such as their current location, current living status, how many people their living with etc. When the user starts the conversation without directly asking for a resource, start with an intro to what this chatbot can do, then do mental health check(the user can opt out of this if they want) and go from there. The goal is to be as conversational as possible."),
+                ("system", "You are HomeFinder, an empathetic AI assistant that helps people experiencing homelessness find resources. You can search the internet for current information. Be warm, understanding, and helpful. Ask follow-up questions to better understand their needs. Focus on practical help like shelters, food, healthcare, and other essential services."),
                 MessagesPlaceholder(variable_name="history"),
                 ("human", "{question}"),
                 ("system","{agent_scratchpad}")
@@ -101,13 +108,15 @@ def init():
             prompt=agent_prompt
     )
 
-#define agent executor
+#define agent executor with proper error handling and iteration limits
     agent_executor = AgentExecutor(
             agent=internet_agent,
             tools=tools,
-            verbose=False,
-            memory=memory,
-            return_intermediate_steps=False,
+            verbose=True,  # Enable verbose for debugging
+            max_iterations=5,  # Limit iterations to prevent loops
+            max_execution_time=30,  # 30 second timeout
+            return_intermediate_steps=True,  # Keep for debugging
+            handle_parsing_errors=True,  # Handle parsing errors gracefully
             output_parser=StrOutputParser()
     )
 
@@ -138,12 +147,20 @@ async def main(message: cl.Message):
     #grab user session id
     config = {"configurable": {"session_id": cl.user_session.get("id")}}
     
-    #get agent response (JSON)
-    response = agent_with_history.invoke({"question": str(message.content)}, config=config)
-    
-    #send agent response to be cleaned into user text
-    cleaned_response = cleaning_chain.invoke({"agent_response":str(response)})
-    await cl.Message(content=cleaned_response).send()
+    try:
+        #get agent response with debugging
+        print(f"DEBUG: User message: {message.content}")
+        response = agent_with_history.invoke({"question": str(message.content)}, config=config)
+        print(f"DEBUG: Agent response: {response}")
+        
+        #send agent response to be cleaned into user text
+        cleaned_response = cleaning_chain.invoke({"agent_response":str(response)})
+        print(f"DEBUG: Cleaned response: {cleaned_response}")
+        await cl.Message(content=cleaned_response).send()
+        
+    except Exception as e:
+        print(f"DEBUG: Error occurred: {str(e)}")
+        await cl.Message(content=f"I'm sorry, I encountered an error: {str(e)}. Please try again or rephrase your question.").send()
 
 '''
 implement function to delete history after session ends (user refreshes or clicks off)
