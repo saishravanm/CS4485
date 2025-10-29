@@ -10,8 +10,7 @@ from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 from langchain_core.runnables.history import RunnableWithMessageHistory
 from langchain_community.chat_message_histories import DynamoDBChatMessageHistory
 from langchain_classic.memory import ConversationBufferMemory
-from langchain_aws.retrievers import AmazonKnowledgeBasesRetriever
-from langchain_classic.agents.agent_toolkits.conversational_retrieval.tool import create_retriever_tool
+
 from dotenv import load_dotenv
 
 def get_session_history(session_id):
@@ -41,7 +40,7 @@ def init():
 
 #create dynamodb instance
     dynamodb = boto3.resource("dynamodb", region_name=region_name)
-    sts_client = boto3.client(
+    client = boto3.client(
         'sts',
         aws_access_key_id= os.getenv("AWS_ACCESS_KEY_ID"),
         aws_secret_access_key=os.getenv("AWS_SECRET_ACCESS_KEY"),
@@ -83,20 +82,8 @@ def init():
             topic="general",
             search_depth="advanced"
     )
-    
-    retriever = AmazonKnowledgeBasesRetriever(
-        knowledge_base_id="VWS7WOM9RG",
-        retrieval_config={"vectorSearchConfiguration": {"numberOfResults": 5}},
-    )
-    
-    kb_tool = create_retriever_tool(
-        retriever,
-        "KnowledgeBaseSearch",
-        "Searches for homeless resources and retrieves from Bedrock Knowledge Base"
-    )
 
 #append created tools to list
-    tools.append(kb_tool)
     tools.append(search_tool)
 
 #define parser
@@ -107,7 +94,7 @@ def init():
 #define agentic prompt - simplified and more conversational
     agent_prompt = ChatPromptTemplate.from_messages(
             [
-                ("system", f"You are HomeFinder, an empathetic AI assistant that helps people in the DFW area experiencing homelessness find resources. When searching for resources, use the knowledge base FIRST (ensure that the user provided parameters such as location adequately MATCH the resources in the knowledge base, don't just blatantly copy info from it), and if there's still any information still missing you can use the internet for current information. The resources returned must be as close as possible in either proximity and/or need to the user provided location/scenario. Be warm, understanding, and helpful. Ask follow-up questions to further refine your searches before using the internet or knowledge base (ie: location, more info about situation etc) to make it more of a personal experience. Focus on practical help like shelters, food, healthcare, and other essential services. Do a sentiment analysis on each user response and base your responses/resources on how the user seems to be feeling. Don't sound robotic, sound conversational. YOU MUST USE {resource_format} as your format for searching and showing the user the information you found."),
+                ("system", f"You are HomeFinder, an empathetic AI assistant that helps people in the DFW area experiencing homelessness find resources. You can search the internet for current information. Be warm, understanding, and helpful. Ask follow-up questions to further refine your searches before using the internet or knowledge base (ie: location, more info about situation etc) to make it more of a personal experience. Focus on practical help like shelters, food, healthcare, and other essential services. Do a sentiment analysis on each user response and base your responses/resources on how the user seems to be feeling. Don't sound robotic, sound conversational. YOU MUST USE {resource_format} as your format for searching and showing the user the information you found."),
                 MessagesPlaceholder(variable_name="history"),
                 ("human", "{question}"),
                 ("system","{agent_scratchpad}")
