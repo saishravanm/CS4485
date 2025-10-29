@@ -10,7 +10,7 @@ from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 from langchain_core.runnables.history import RunnableWithMessageHistory
 from langchain_community.chat_message_histories import DynamoDBChatMessageHistory
 from langchain_classic.memory import ConversationBufferMemory
-
+import json
 from dotenv import load_dotenv
 
 def get_session_history(session_id):
@@ -25,6 +25,23 @@ def get_session_history(session_id):
         session_id=session_id,
         boto3_session=session
     )
+
+def remove_PII(text):
+    #language_response = comprehend_client.detect_dominant_language(Text=text).json()
+    #language = language_response['']
+    comprehend_client = boto3.client(
+        service_name="comprehend",
+        aws_access_key_id = os.getenv("AWS_ACCESS_KEY_ID"),
+        aws_secret_access_key=os.getenv("AWS_SECRET_ACCESS_KEY")
+    )
+    response = comprehend_client.detect_pii_entities(Text=text,LanguageCode="en")
+    redacted_text = list(text)
+    for entity in response['Entities']:
+        if entity['Type'] != 'ADDRESS':
+            for i in range(entity['BeginOffset'],entity['EndOffset']):
+                redacted_text[i] = '*'
+    redacted_text = "".join(redacted_text)
+    return redacted_text
 
 # SerpAPI function removed - now using TavilySearch
 
@@ -46,6 +63,7 @@ def init():
         aws_secret_access_key=os.getenv("AWS_SECRET_ACCESS_KEY"),
         region_name=region_name
     )
+    
 
 # Create Bedrock client first
     bedrock_client = boto3.client(
@@ -94,7 +112,7 @@ def init():
 #define agentic prompt - simplified and more conversational
     agent_prompt = ChatPromptTemplate.from_messages(
             [
-                ("system", f"You are HomeFinder, an empathetic AI assistant that helps people in the DFW area experiencing homelessness find resources. You can search the internet for current information. Be warm, understanding, and helpful. Ask follow-up questions to further refine your searches before using the internet or knowledge base (ie: location, more info about situation etc) to make it more of a personal experience. Focus on practical help like shelters, food, healthcare, and other essential services. Do a sentiment analysis on each user response and base your responses/resources on how the user seems to be feeling. Don't sound robotic, sound conversational. YOU MUST USE {resource_format} as your format for searching and showing the user the information you found."),
+                ("system", f"You are HomeFinder, an empathetic AI assistant that helps people in the DFW area experiencing homelessness find resources. You can search the internet for current information. Be warm, understanding, and helpful. Ask follow-up questions to further refine your searches before using the internet or knowledge base (ie: location, more info about situation etc) to make it more of a personal experience. Focus on practical help like shelters, food, healthcare, and other essential services. Do a sentiment analysis on each user response and base your responses/resources on how the user seems to be feeling. Don't sound robotic, sound conversational. YOU MUST USE {resource_format} as your format for searching and showing the user the information you found. If the user has seemed to provide any personal identifiable information, kindly request them to not include anything as such (pii information you recieve should be donated by multiple *'s)"),
                 MessagesPlaceholder(variable_name="history"),
                 ("human", "{question}"),
                 ("system","{agent_scratchpad}")
@@ -156,7 +174,8 @@ async def main(message: cl.Message):
     try:
         #get agent response with debugging
         print(f"DEBUG: User message: {message.content}")
-        response = agent_with_history.invoke({"question": str(message.content)}, config=config)
+        pii_removed_message = remove_PII(message.content)
+        response = agent_with_history.invoke({"question": str(pii_removed_message)}, config=config)
         print(f"DEBUG: Agent response: {response}")
         
         #send agent response to be cleaned into user text
