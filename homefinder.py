@@ -9,6 +9,8 @@ from langchain_classic.agents import create_tool_calling_agent, AgentExecutor
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 from langchain_core.runnables.history import RunnableWithMessageHistory
 from langchain_community.chat_message_histories import DynamoDBChatMessageHistory
+from langchain_classic.memory import ConversationBufferMemory
+
 from dotenv import load_dotenv
 
 def get_session_history(session_id):
@@ -78,6 +80,7 @@ def init():
     search_tool = TavilySearch(
             max_results=5,
             topic="general",
+            search_depth="advanced"
     )
 
 #append created tools to list
@@ -86,10 +89,12 @@ def init():
 #define parser
     output_parser = StrOutputParser()
 
+    resource_format = "Name: , Street Address: , Offered Services: , Average Cost: ,  Phone Number: , Website Link: "
+    
 #define agentic prompt - simplified and more conversational
     agent_prompt = ChatPromptTemplate.from_messages(
             [
-                ("system", "You are HomeFinder, an empathetic AI assistant that helps people experiencing homelessness find resources. You can search the internet for current information. Be warm, understanding, and helpful. Ask follow-up questions to better understand their needs. Focus on practical help like shelters, food, healthcare, and other essential services."),
+                ("system", f"You are HomeFinder, an empathetic AI assistant that helps people in the DFW area experiencing homelessness find resources. You can search the internet for current information. Be warm, understanding, and helpful. Ask follow-up questions to further refine your searches before using the internet or knowledge base (ie: location, more info about situation etc) to make it more of a personal experience. Focus on practical help like shelters, food, healthcare, and other essential services. Do a sentiment analysis on each user response and base your responses/resources on how the user seems to be feeling. Don't sound robotic, sound conversational. YOU MUST USE {resource_format} as your format for searching and showing the user the information you found."),
                 MessagesPlaceholder(variable_name="history"),
                 ("human", "{question}"),
                 ("system","{agent_scratchpad}")
@@ -107,7 +112,7 @@ def init():
             tools=tools,
             prompt=agent_prompt
     )
-
+    memory = ConversationBufferMemory(chat_memory=history,memory_key="history",return_messages=True)
 #define agent executor with proper error handling and iteration limits
     agent_executor = AgentExecutor(
             agent=internet_agent,
@@ -117,7 +122,8 @@ def init():
             max_execution_time=30,  # 30 second timeout
             return_intermediate_steps=True,  # Keep for debugging
             handle_parsing_errors=True,  # Handle parsing errors gracefully
-            output_parser=StrOutputParser()
+            output_parser=StrOutputParser(),
+            memory=memory
     )
 
     cleaning_chain = cleaning_prompt | model | output_parser
