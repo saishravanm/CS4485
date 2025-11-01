@@ -10,6 +10,8 @@ from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 from langchain_core.runnables.history import RunnableWithMessageHistory
 from langchain_community.chat_message_histories import DynamoDBChatMessageHistory
 from langchain_classic.memory import ConversationBufferMemory
+from langchain_aws.retrievers import AmazonKnowledgeBasesRetriever
+from langchain_classic.agents.agent_toolkits.conversational_retrieval.tool import create_retriever_tool
 import json
 from dotenv import load_dotenv
 
@@ -34,7 +36,11 @@ def remove_PII(text):
         aws_access_key_id = os.getenv("AWS_ACCESS_KEY_ID"),
         aws_secret_access_key=os.getenv("AWS_SECRET_ACCESS_KEY")
     )
-    response = comprehend_client.detect_pii_entities(Text=text,LanguageCode="en")
+    language_code = comprehend_client.detect_dominant_language(Text=text)['Languages'][0]['LanguageCode']
+    print(language_code)
+    if language_code != "en" or language_code != "es":
+        language_code = "en"
+    response = comprehend_client.detect_pii_entities(Text=text,LanguageCode=language_code)
     redacted_text = list(text)
     for entity in response['Entities']:
         if entity['Type'] != 'ADDRESS':
@@ -57,7 +63,7 @@ def init():
 
 #create dynamodb instance
     dynamodb = boto3.resource("dynamodb", region_name=region_name)
-    client = boto3.client(
+    sts_client = boto3.client(
         'sts',
         aws_access_key_id= os.getenv("AWS_ACCESS_KEY_ID"),
         aws_secret_access_key=os.getenv("AWS_SECRET_ACCESS_KEY"),
@@ -100,8 +106,20 @@ def init():
             topic="general",
             search_depth="advanced"
     )
+    
+    retriever = AmazonKnowledgeBasesRetriever(
+        knowledge_base_id="VWS7WOM9RG",
+        retrieval_config={"vectorSearchConfiguration": {"numberOfResults": 5}},
+    )
+    
+    kb_tool = create_retriever_tool(
+        retriever,
+        "KnowledgeBaseSearch",
+        "Searches for homeless resources and retrieves from Bedrock Knowledge Base"
+    )
 
 #append created tools to list
+    tools.append(kb_tool)
     tools.append(search_tool)
 
 #define parser
@@ -112,8 +130,7 @@ def init():
 #define agentic prompt - simplified and more conversational
     agent_prompt = ChatPromptTemplate.from_messages(
             [
-                ("system", f"You are HomeFinder, an empathetic AI assistant that helps people in the DFW area experiencing homelessness find resources. You can search the internet for current information. Be warm, understanding, and helpful. Ask follow-up questions to further refine your searches before using the internet or knowledge base (ie: location, more info about situation etc) to make it more of a personal experience. Focus on practical help like shelters, food, healthcare, and other essential services. Do a sentiment analysis on each user response and base your responses/resources on how the user seems to be feeling. Don't sound robotic, sound conversational. YOU MUST USE {resource_format} as your format for searching and showing the user the information you found. If the user has seemed to provide any personal identifiable information, kindly request them to not include anything as such (pii information you recieve should be donated by multiple *'s)"),
-                MessagesPlaceholder(variable_name="history"),
+                ("system", f"You are HomeFinder, an empathetic AI assistant that helps people in the DFW area experiencing homelessness find resources. Recognize the user's language that they're speaking in (if it's hard to tell what language they're speaking in, the default language is English), and translate all your responses (and responses coming from any tools) during the conversation in the user speaking language. Before searching for resources, make sure you speak to the user empathetically about their situation, and when it seems clear that they just want the resources and not a detailed conversation about their needs, search for resources with the information you have. When searching for resources, send the search request in the language that the user is speaking in, use the knowledge base FIRST (ensure that the user provided parameters such as location adequately MATCH the resources in the knowledge base, don't just blatantly copy info from it), and if there's still any information still missing you can use the internet for current information. The resources returned must be as close as possible in either proximity and/or need to the user provided location/scenario. Be warm, understanding, and helpful. Ask follow-up questions to further refine your searches before using the internet or knowledge base (ie: location, more info about situation etc) to make it more of a personal experience. Focus on practical help like shelters, food, healthcare, and other essential services. Do a sentiment analysis on each user response and base your responses/resources on how the user seems to be feeling. Don't sound robotic, sound conversational. YOU MUST USE {resource_format} as your format for searching and showing the user the information you found.If the user has seemed to provide any personal identifiable information, kindly request them to not include anything as such (pii information you recieve should be donated by multiple *'s)"),                MessagesPlaceholder(variable_name="history"),
                 ("human", "{question}"),
                 ("system","{agent_scratchpad}")
             ]
@@ -174,6 +191,8 @@ async def main(message: cl.Message):
     try:
         #get agent response with debugging
         print(f"DEBUG: User message: {message.content}")
+        
+        #get the PII removed text
         pii_removed_message = remove_PII(message.content)
         response = agent_with_history.invoke({"question": str(pii_removed_message)}, config=config)
         print(f"DEBUG: Agent response: {response}")
