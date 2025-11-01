@@ -12,6 +12,7 @@ from langchain_community.chat_message_histories import DynamoDBChatMessageHistor
 from langchain_classic.memory import ConversationBufferMemory
 from langchain_aws.retrievers import AmazonKnowledgeBasesRetriever
 from langchain_classic.agents.agent_toolkits.conversational_retrieval.tool import create_retriever_tool
+import json
 from dotenv import load_dotenv
 
 def get_session_history(session_id):
@@ -26,6 +27,23 @@ def get_session_history(session_id):
         session_id=session_id,
         boto3_session=session
     )
+
+def remove_PII(text):
+    #language_response = comprehend_client.detect_dominant_language(Text=text).json()
+    #language = language_response['']
+    comprehend_client = boto3.client(
+        service_name="comprehend",
+        aws_access_key_id = os.getenv("AWS_ACCESS_KEY_ID"),
+        aws_secret_access_key=os.getenv("AWS_SECRET_ACCESS_KEY")
+    )
+    response = comprehend_client.detect_pii_entities(Text=text,LanguageCode="en")
+    redacted_text = list(text)
+    for entity in response['Entities']:
+        if entity['Type'] != 'ADDRESS':
+            for i in range(entity['BeginOffset'],entity['EndOffset']):
+                redacted_text[i] = '*'
+    redacted_text = "".join(redacted_text)
+    return redacted_text
 
 # SerpAPI function removed - now using TavilySearch
 
@@ -47,6 +65,7 @@ def init():
         aws_secret_access_key=os.getenv("AWS_SECRET_ACCESS_KEY"),
         region_name=region_name
     )
+    
 
 # Create Bedrock client first
     bedrock_client = boto3.client(
@@ -169,7 +188,8 @@ async def main(message: cl.Message):
     try:
         #get agent response with debugging
         print(f"DEBUG: User message: {message.content}")
-        response = agent_with_history.invoke({"question": str(message.content)}, config=config)
+        pii_removed_message = remove_PII(message.content)
+        response = agent_with_history.invoke({"question": str(pii_removed_message)}, config=config)
         print(f"DEBUG: Agent response: {response}")
         
         #send agent response to be cleaned into user text
