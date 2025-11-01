@@ -60,7 +60,7 @@ def init():
     
     #define region
     region_name = "us-east-1"
-
+    cl.user_session.set("region_name",region_name)
 #create dynamodb instance
     dynamodb = boto3.resource("dynamodb", region_name=region_name)
     sts_client = boto3.client(
@@ -206,10 +206,15 @@ async def main(message: cl.Message):
         print(f"DEBUG: Error occurred: {str(e)}")
         await cl.Message(content=f"I'm sorry, I encountered an error: {str(e)}. Please try again or rephrase your question.").send()
 
-'''
-implement function to delete history after session ends (user refreshes or clicks off)
+
+#implement function to delete history after session ends (user refreshes or clicks off)
 @cl.on_chat_end
 def deleteHistory():
-'''
+    user_id = cl.user_session.get('id')
+    region_name = cl.user_session.get('region_name')
+    dynamodb = boto3.resource("dynamodb", region_name=region_name)
+    table = dynamodb.Table('SessionTable')
+    response = table.delete_item(Key={'SessionId': user_id})
+    
 
     
