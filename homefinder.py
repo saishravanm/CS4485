@@ -137,8 +137,15 @@ def init():
     )   
 #defining cleaning prompt
     cleaning_prompt = ChatPromptTemplate.from_template(
-            "Here is the agent's response:\n\n{agent_response}\n\n"
-            "Extract and return ONLY the final user-facing answer, so remove all thinking, internal thoughts, processing, and debug info. Don't include any of your thinking either like \"here is the final answer\". Omit any characters (whether it's empty newline characters etc) that make the response less clear or messy to the user. Return it in properly formatted markdown (NO MARKDOWN BOX WITH PLAIN_TEXT) that can render neatly in a Chainlit frontend (similar to chatgpt)"
+        "You are cleaning up an AI assistant reply for display in a chat UI.\n\n"
+        "Original reply:\n\n{agent_response}\n\n"
+        "Return a cleaned version of the same reply with these rules:\n"
+        "- Keep all user-facing text and helpful markdown formatting.\n"
+        "- If the reply contains any JSON blocks (for example, a list of resource objects),\n"
+        "  KEEP the JSON exactly as-is so that a frontend can parse it.\n"
+        "- Remove only obvious debug traces, stack traces, or tool logs.\n"
+        "- Do NOT add extra commentary like 'Here is the cleaned answer'.\n\n"
+        "Return only the cleaned reply as markdown."
     )
 
 #define primary agent
@@ -177,34 +184,52 @@ def init():
     cl.user_session.set("agent_with_history",agent_with_history)
 
 
-        
+#REACT INTEGRATION (backend side)      
 @cl.on_message
 async def main(message: cl.Message):
-    
-    #retrieve agent and cleaning chains
+    # retrieve agent and cleaning chains
     agent_with_history = cl.user_session.get("agent_with_history")
     cleaning_chain = cl.user_session.get("cleaning_layer")
 
-    #grab user session id
+    # grab user session id for history config
     config = {"configurable": {"session_id": cl.user_session.get("id")}}
-    
+
     try:
-        #get agent response with debugging
         print(f"DEBUG: User message: {message.content}")
-        
-        #get the PII removed text
+
+        # 1) Remove PII from the incoming message
         pii_removed_message = remove_PII(message.content)
-        response = agent_with_history.invoke({"question": str(pii_removed_message)}, config=config)
-        print(f"DEBUG: Agent response: {response}")
-        
-        #send agent response to be cleaned into user text
-        cleaned_response = cleaning_chain.invoke({"agent_response":str(response)})
+
+        # 2) Call the agent with history
+        agent_result = agent_with_history.invoke(
+            {"question": str(pii_removed_message)},
+            config=config,
+        )
+        print(f"DEBUG: Raw agent result: {agent_result}")
+
+        # 3) Extract just the final answer text from the agent result
+        # AgentExecutor usually returns a dict: {"output": <text>, "intermediate_steps": [...]}
+        if isinstance(agent_result, dict) and "output" in agent_result:
+            raw_answer = agent_result["output"]
+        else:
+            # Fallback in case the structure is different
+            raw_answer = str(agent_result)
+
+        print(f"DEBUG: Agent raw answer string: {raw_answer!r}")
+
+        # 4) Clean it – remove debug noise but keep markdown & JSON intact
+        cleaned_response = cleaning_chain.invoke({"agent_response": raw_answer})
         print(f"DEBUG: Cleaned response: {cleaned_response}")
-        await cl.Message(content=cleaned_response).send()
-        
+
+        # 5) Send as a Step so your React app sees it in `step.output`
+        async with cl.Step(name="assistant", type="llm") as step:
+            step.output = cleaned_response
+
     except Exception as e:
         print(f"DEBUG: Error occurred: {str(e)}")
-        await cl.Message(content=f"I'm sorry, I encountered an error: {str(e)}. Please try again or rephrase your question.").send()
+        await cl.Message(
+            content=f"I'm sorry, I encountered an error: {str(e)}. Please try again or rephrase your question."
+        ).send()
 
 
 #implement function to delete history after session ends (user refreshes or clicks off)
