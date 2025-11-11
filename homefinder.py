@@ -15,8 +15,6 @@ from langchain_classic.agents.agent_toolkits.conversational_retrieval.tool impor
 import json
 from dotenv import load_dotenv
 
-load_dotenv()
-
 def get_session_history(session_id):
     # Create boto3 session with credentials
     session = boto3.Session(
