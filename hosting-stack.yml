@@ -1,0 +1,93 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: Static React app hosting with S3 (private) + CloudFront (OAI) and SPA routing.
+
+Parameters:
+  SiteBucketName:
+    Type: String
+    Description: S3 bucket name for the site assets (must be globally unique).
+  PriceClass:
+    Type: String
+    Default: PriceClass_100
+    AllowedValues: [PriceClass_100, PriceClass_200, PriceClass_All]
+    Description: CloudFront price class / edge coverage.
+
+Resources:
+  # Private bucket for your built files
+  SiteBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Ref SiteBucketName
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      VersioningConfiguration:
+        Status: Enabled
+
+  # Origin Access Identity so CloudFront can read the private bucket
+  CloudFrontOAI:
+    Type: AWS::CloudFront::CloudFrontOriginAccessIdentity
+    Properties:
+      CloudFrontOriginAccessIdentityConfig:
+        Comment: !Sub OAI for ${SiteBucketName}
+
+  # Allow only CloudFront (via OAI) to GET objects
+  SiteBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref SiteBucket
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: AllowCloudFrontReadViaOAI
+            Effect: Allow
+            Principal:
+              CanonicalUser: !GetAtt CloudFrontOAI.S3CanonicalUserId
+            Action: s3:GetObject
+            Resource: !Sub arn:aws:s3:::${SiteBucketName}/*
+
+  # CloudFront distribution in front of the bucket
+  CloudFrontDistribution:
+    Type: AWS::CloudFront::Distribution
+    Properties:
+      DistributionConfig:
+        Enabled: true
+        Comment: Static React app via S3 + CloudFront (OAI)
+        DefaultRootObject: index.html
+        PriceClass: !Ref PriceClass
+        Origins:
+          - Id: S3Origin
+            DomainName: !GetAtt SiteBucket.RegionalDomainName
+            S3OriginConfig:
+              OriginAccessIdentity: !Sub origin-access-identity/cloudfront/${CloudFrontOAI}
+        DefaultCacheBehavior:
+          TargetOriginId: S3Origin
+          ViewerProtocolPolicy: redirect-to-https
+          AllowedMethods: [GET, HEAD]
+          CachedMethods: [GET, HEAD]
+          Compress: true
+          ForwardedValues:
+            QueryString: true
+            Cookies:
+              Forward: none
+        # SPA routing: map 403/404 to index.html so client routes work on refresh
+        CustomErrorResponses:
+          - ErrorCode: 403
+            ResponsePagePath: /index.html
+            ResponseCode: 200
+            ErrorCachingMinTTL: 0
+          - ErrorCode: 404
+            ResponsePagePath: /index.html
+            ResponseCode: 200
+            ErrorCachingMinTTL: 0
+        ViewerCertificate:
+          CloudFrontDefaultCertificate: true
+
+Outputs:
+  BucketName:
+    Description: S3 bucket for uploads (sync your build/ here)
+    Value: !Ref SiteBucket
+  CloudFrontURL:
+    Description: HTTPS URL to share
+    Value: !Sub https://${CloudFrontDistribution.DomainName}

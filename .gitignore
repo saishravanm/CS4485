@@ -1,5 +1,15 @@
+# don't upload dependencies
+node_modules/
+
+# don't upload build artifacts if this is just the dev repo
+dist/
+build/
+
+# don't upload environment secrets
 .env
-__pycache__
-.chainlit
-.files
-.venv
+.env.*
+*.env
+
+# misc
+.DS_Store
+*.log
