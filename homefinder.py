@@ -15,17 +15,29 @@ from langchain_classic.agents.agent_toolkits.conversational_retrieval.tool impor
 import json
 from dotenv import load_dotenv
 
+region_name = "us-east-1"
+def get_secret_key(secret_name):
+    client = boto3.client('secretsmanager',region_name=region_name)
+    
+    try:
+        get_secret_value_response = client.get_secret_value(SecretId=secret_name)
+    except Exception as e:
+        raise e
+    else:
+        if 'SecretString' in get_secret_value_response:
+            secret = get_secret_value_response['SecretString']
+            return json.loads(secret)
+
+
 def get_session_history(session_id):
     # Create boto3 session with credentials
     session = boto3.Session(
-        aws_access_key_id=os.getenv("AWS_ACCESS_KEY_ID"),
-        aws_secret_access_key=os.getenv("AWS_SECRET_ACCESS_KEY"),
         region_name="us-east-1"
     )
     return DynamoDBChatMessageHistory(
         table_name="SessionTable",
         session_id=session_id,
-        boto3_session=session
+        boto3_session=session,
     )
 
 def remove_PII(text):
@@ -33,8 +45,7 @@ def remove_PII(text):
     #language = language_response['']
     comprehend_client = boto3.client(
         service_name="comprehend",
-        aws_access_key_id = os.getenv("AWS_ACCESS_KEY_ID"),
-        aws_secret_access_key=os.getenv("AWS_SECRET_ACCESS_KEY")
+        region_name=region_name
     )
     language_code = comprehend_client.detect_dominant_language(Text=text)['Languages'][0]['LanguageCode']
     print(language_code)
@@ -59,14 +70,11 @@ def init():
     session_id = cl.user_session.get("id")
     
     #define region
-    region_name = "us-east-1"
     cl.user_session.set("region_name",region_name)
 #create dynamodb instance
     dynamodb = boto3.resource("dynamodb", region_name=region_name)
     sts_client = boto3.client(
         'sts',
-        aws_access_key_id= os.getenv("AWS_ACCESS_KEY_ID"),
-        aws_secret_access_key=os.getenv("AWS_SECRET_ACCESS_KEY"),
         region_name=region_name
     )
     
@@ -75,8 +83,6 @@ def init():
     bedrock_client = boto3.client(
         service_name="bedrock-runtime",
         region_name=region_name,
-        aws_access_key_id=os.getenv("AWS_ACCESS_KEY_ID"),
-        aws_secret_access_key=os.getenv("AWS_SECRET_ACCESS_KEY"),
     )
 
 # Create the Bedrock model instance
@@ -89,8 +95,6 @@ def init():
     tools = []
     # Create boto3 session with credentials
     session = boto3.Session(
-        aws_access_key_id=os.getenv("AWS_ACCESS_KEY_ID"),
-        aws_secret_access_key=os.getenv("AWS_SECRET_ACCESS_KEY"),
         region_name=region_name
     )
     history = DynamoDBChatMessageHistory(
@@ -100,6 +104,7 @@ def init():
     )
 
 ##define tools
+    os.environ["TAVILY_API_KEY"] = get_secret_key("tavapikey")["TAVILY_API_KEY"]
     # Use TavilySearch for web search
     search_tool = TavilySearch(
             max_results=5,
@@ -110,6 +115,7 @@ def init():
     retriever = AmazonKnowledgeBasesRetriever(
         knowledge_base_id="VWS7WOM9RG",
         retrieval_config={"vectorSearchConfiguration": {"numberOfResults": 5}},
+        region_name=region_name
     )
     
     kb_tool = create_retriever_tool(
@@ -215,6 +221,3 @@ def deleteHistory():
     dynamodb = boto3.resource("dynamodb", region_name=region_name)
     table = dynamodb.Table('SessionTable')
     response = table.delete_item(Key={'SessionId': user_id})
-    
-
-    
