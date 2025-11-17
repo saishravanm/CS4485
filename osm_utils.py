@@ -81,95 +81,35 @@ def geocode_address(address: str) -> tuple[float, float] | tuple[None, None]:
         return None, None
 
 
-def query_shelters_near_location(
-    lat: float, 
-    lon: float, 
-    radius_m: int = 5000
-) -> list[dict]:
+def execute_overpass_query(query: str) -> dict:
     """
-    Query homeless shelters near coordinates using OpenStreetMap Overpass API.
+    Execute an Overpass API query and return results.
+    
+    The query should already have coordinates filled in (no placeholders).
+    This is a general-purpose function that executes any valid Overpass QL query.
     
     Args:
-        lat: Latitude coordinate
-        lon: Longitude coordinate
-        radius_m: Search radius in meters (default: 5000 = 5km)
+        query: Complete Overpass QL query string (should already have coordinates)
     
     Returns:
-        List of shelter dictionaries with name, coordinates, address, etc.
-        Each dict contains: name, latitude, longitude, address, osm_url
+        Dictionary with Overpass API response, typically containing 'elements' list
+        Returns empty dict on error
     """
-    # Build Overpass query for shelters
-    query = f"""
-    [out:json][timeout:25];
-    (
-      node(around:{radius_m},{lat},{lon})["amenity"="shelter"];
-      way(around:{radius_m},{lat},{lon})["amenity"="shelter"];
-      relation(around:{radius_m},{lat},{lon})["amenity"="shelter"];
-
-      node(around:{radius_m},{lat},{lon})["amenity"="social_facility"]["social_facility"="shelter"];
-      way(around:{radius_m},{lat},{lon})["amenity"="social_facility"]["social_facility"="shelter"];
-      relation(around:{radius_m},{lat},{lon})["amenity"="social_facility"]["social_facility"="shelter"];
-
-      node(around:{radius_m},{lat},{lon})["social_facility:for"="homeless"];
-      way(around:{radius_m},{lat},{lon})["social_facility:for"="homeless"];
-      relation(around:{radius_m},{lat},{lon})["social_facility:for"="homeless"];
-    );
-    out center tags;
-    """.strip()
-
     headers = {
-        "User-Agent": USER_AGENT_BASE, 
+        "User-Agent": USER_AGENT_BASE,
         "Content-Type": "application/x-www-form-urlencoded"
     }
     
     try:
         raw = _http_post(
-            OVERPASS_URL, 
-            f"data={urllib.parse.quote_plus(query)}", 
-            headers=headers, 
+            OVERPASS_URL,
+            f"data={urllib.parse.quote_plus(query)}",
+            headers=headers,
             timeout=60
         )
         data = json.loads(raw.decode("utf-8"))
-
-        results = []
-        for el in data.get("elements", []):
-            tags = el.get("tags", {}) or {}
-
-            # Get coordinates for node vs way/relation
-            if "lat" in el and "lon" in el:
-                el_lat, el_lon = el["lat"], el["lon"]
-            else:
-                center = el.get("center")
-                if not center:
-                    continue
-                el_lat, el_lon = center["lat"], center["lon"]
-
-            # Build address string from address components
-            addr_parts = []
-            for k in ("addr:housenumber", "addr:street", "addr:city", "addr:state", "addr:postcode"):
-                if k in tags:
-                    addr_parts.append(tags[k])
-            addr_str = ", ".join(addr_parts) if addr_parts else None
-
-            results.append({
-                "name": tags.get("name", "Unnamed Shelter"),
-                "latitude": el_lat,
-                "longitude": el_lon,
-                "address": addr_str,
-                "osm_url": f"https://www.openstreetmap.org/{el['type']}/{el['id']}",
-            })
-
-        # Deduplicate shelters based on name and coordinates
-        seen = set()
-        unique = []
-        for r in results:
-            key = (r["name"], round(float(r["latitude"]), 6), round(float(r["longitude"]), 6))
-            if key not in seen:
-                seen.add(key)
-                unique.append(r)
-
-        return unique
+        return data
     except Exception as e:
-        print(f"Error querying shelters near ({lat}, {lon}): {e}")
-        return []
+        print(f"Error executing Overpass query: {e}")
+        return {}
 
