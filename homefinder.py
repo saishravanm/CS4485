@@ -236,13 +236,9 @@ async def main(message: cl.Message):
     try:
         #get agent response with debugging
         print(f"DEBUG: User message: {message.content}")
-<<<<<<< Updated upstream
-        
-=======
         if message.content == "Emergency":
             await cl.Message("Emergency Number List: \n911\n Crisis Hotline: 988 \n Homeless Hotline: (555) 211-HELP \nDomestic Violence Hotline: (555) 799-SAFE \n Disaster Distress Helpline 1-800-985-5990 \n National Maternal Mental Health Hotline 1-833-TLC-MAMA (1-833-852-6262) \n Poison Help Hotline 1-800-222-1222 \nSubstance Abuse and Mental Health Services Administration’s National Helpline 1-800-662-HELP (1-800-622-4357) ").send()
             
->>>>>>> Stashed changes
         #get the PII removed text
         pii_removed_message = remove_PII(message.content)
         response = agent_with_history.invoke({"question": str(pii_removed_message)}, config=config)
