@@ -1,0 +1,5 @@
+/* Send button inside chat input */
+.cl-chat-input > button:hover {
+    background-color: #2ea043 !important;   /* your hover color */
+    color: white !important;                /* icon color */
+}
