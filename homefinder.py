@@ -14,6 +14,7 @@ from langchain_aws.retrievers import AmazonKnowledgeBasesRetriever
 from langchain_classic.agents.agent_toolkits.conversational_retrieval.tool import create_retriever_tool
 import json
 from dotenv import load_dotenv
+import re
 
 def get_session_history(session_id):
     # Create boto3 session with credentials
@@ -176,7 +177,20 @@ def init():
     cl.user_session.set("cleaning_layer",cleaning_chain)
     cl.user_session.set("agent_with_history",agent_with_history)
 
+# Map integration helper, detect when resource(s) are provided by bot
+RESOURCE_REGEX = re.compile(
+    r"Name:\s*(?P<name>[^,\n]*)\s*,\s*Street Address:\s*(?P<address>[^,\n]*)\s*,",
+    re.IGNORECASE,
+)
 
+def extract_resources(text: str):
+    resources = []
+    for m in RESOURCE_REGEX.finditer(text):
+        name = m.group("name").strip()
+        addr = m.group("address").strip()
+        if addr:
+            resources.append({"name": name, "streetAddress": addr})
+    return resources
         
 @cl.on_message
 async def main(message: cl.Message):
@@ -200,7 +214,22 @@ async def main(message: cl.Message):
         #send agent response to be cleaned into user text
         cleaned_response = cleaning_chain.invoke({"agent_response":str(response)})
         print(f"DEBUG: Cleaned response: {cleaned_response}")
-        await cl.Message(content=cleaned_response).send()
+        
+        #map integration; extract resources & build map element
+        resources = extract_resources(cleaned_response)
+        elements = []
+
+        if resources:
+            maps_key = os.environ.get("GOOGLE_MAPS_API_KEY")
+            if maps_key:
+                map_el = cl.CustomElement(
+                    name="ResourceMap",
+                    props={"resources": resources, "googleMapsApiKey": maps_key},
+                    display="inline",  #show under the message
+                )
+                elements.append(map_el)
+                
+        await cl.Message(content=cleaned_response, elements=elements).send()
         
     except Exception as e:
         print(f"DEBUG: Error occurred: {str(e)}")
