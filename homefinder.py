@@ -1,3 +1,6 @@
+from email import encoders
+from email.mime.base import MIMEBase
+from email.mime.multipart import MIMEMultipart
 import chainlit as cl
 import uuid
 import boto3
@@ -14,8 +17,56 @@ from langchain_aws.retrievers import AmazonKnowledgeBasesRetriever
 from langchain_classic.agents.agent_toolkits.conversational_retrieval.tool import create_retriever_tool
 import json
 from dotenv import load_dotenv
+import chainlit.data as cl_data
+import smtplib
+from email.message import EmailMessage
 
 region_name = "us-east-1"
+
+class CustomDataLayer(cl_data.BaseDataLayer):
+    async def upsert_feedback(self, feedback):
+        filename = "feedback.json"
+        data = {
+         "sentiment":feedback.value,
+         "feedback":feedback.comment,   
+        }
+        with open(filename, "a") as file: 
+            json.dump(data,file,indent=4)
+        return await super().upsert_feedback(feedback)
+    
+    async def build_debug_url(self):
+        return await super().build_debug_url()
+    async def close(self):
+        return await super().close()
+    async def create_element(self, element):
+        return await super().create_element(element)
+    async def create_step(self, step_dict):
+        return await super().create_step(step_dict)
+    async def create_user(self, user):
+        return await super().create_user(user)
+    async def delete_element(self, element_id, thread_id = None):
+        return await super().delete_element(element_id, thread_id)
+    async def delete_feedback(self, feedback_id):
+        return await super().delete_feedback(feedback_id)
+    async def delete_step(self, step_id):
+        return await super().delete_step(step_id)
+    async def delete_thread(self, thread_id):
+        return await super().delete_thread(thread_id)
+    async def get_element(self, thread_id, element_id):
+        return await super().get_element(thread_id, element_id)
+    async def get_thread(self, thread_id):
+        return await super().get_thread(thread_id)
+    async def get_thread_author(self, thread_id):
+        return await super().get_thread_author(thread_id)
+    async def get_user(self, identifier):
+        return await super().get_user(identifier)
+    async def list_threads(self, pagination, filters):
+        return await super().list_threads(pagination, filters)
+    async def update_step(self, step_dict):
+        return await super().update_step(step_dict)
+    async def update_thread(self, thread_id, name = None, user_id = None, metadata = None, tags = None):
+        return await super().update_thread(thread_id, name, user_id, metadata, tags)
+
 
 @cl.on_message
 async def on_starter(message: cl.Message):
@@ -100,9 +151,10 @@ def remove_PII(text):
 
 # SerpAPI function removed - now using TavilySearch
 
+cl_data._data_layer=CustomDataLayer()
+
 @cl.on_chat_start
 async def init():
-    
     #generate user session id for the session
     session_id = uuid.uuid4()
     cl.user_session.set("id",session_id)
@@ -197,7 +249,7 @@ async def init():
     agent_executor = AgentExecutor(
             agent=internet_agent,
             tools=tools,
-            verbose=True,  # Enable verbose for debugging
+            verbose=False,  # Enable verbose for debugging
             max_iterations=5,  # Limit iterations to prevent loops
             max_execution_time=30,  # 30 second timeout
             return_intermediate_steps=True,  # Keep for debugging
@@ -242,13 +294,13 @@ async def main(message: cl.Message):
         #get the PII removed text
         pii_removed_message = remove_PII(message.content)
         response = agent_with_history.invoke({"question": str(pii_removed_message)}, config=config)
-        print(f"DEBUG: Agent response: {response}")
+        #print(f"DEBUG: Agent response: {response}")
         
         #send agent response to be cleaned into user text
         cleaned_response = cleaning_chain.invoke({"agent_response":str(response)})
-        print(f"DEBUG: Cleaned response: {cleaned_response}")
+        #print(f"DEBUG: Cleaned response: {cleaned_response}")
+        cl.user_session.set("current_llm_message",cleaned_response)
         await cl.Message(content=cleaned_response).send()
-        
     except Exception as e:
         print(f"DEBUG: Error occurred: {str(e)}")
         await cl.Message(content=f"I'm sorry, I encountered an error: {str(e)}. Please try again or rephrase your question.").send()
@@ -262,3 +314,20 @@ def deleteHistory():
     dynamodb = boto3.resource("dynamodb", region_name=region_name)
     table = dynamodb.Table('SessionTable')
     response = table.delete_item(Key={'SessionId': user_id})
+    feedback = open('feedback.json','rb')
+    
+    msg = MIMEMultipart()
+        
+    server = smtplib.SMTP("smtp.gmail.com",587)
+    server.starttls()
+    server.login("homefinder316@gmail.com", "oaiqmqpfgxbxibrw")
+    
+    attachment_package = MIMEBase('application','octet-stream')
+    attachment_package.set_payload((feedback).read())
+    encoders.encode_base64(attachment_package)
+    attachment_package.add_header('Content-Disposition',"attachment; filename=feedback.json")
+    msg.attach(attachment_package)
+    server.sendmail("homefinder316@gmail.com","saishravanm@gmail.com",msg.as_string())
+
+    with open('feedback.json','w'):
+        pass
