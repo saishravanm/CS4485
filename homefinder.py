@@ -14,6 +14,7 @@ from langchain_aws.retrievers import AmazonKnowledgeBasesRetriever
 from langchain_classic.agents.agent_toolkits.conversational_retrieval.tool import create_retriever_tool
 import json
 from dotenv import load_dotenv
+from location_request import get_user_location
 
 region_name = "us-east-1"
 def get_secret_key(secret_name):
@@ -62,8 +63,50 @@ def remove_PII(text):
 
 # SerpAPI function removed - now using TavilySearch
 
+# Chainlit action handler to receive location from frontend
+@cl.action_callback("set_location")
+async def on_set_location(action: cl.Action):
+    """
+    Receives location coordinates from location.js and stores in user session
+    """
+    try:
+        print(f"🔔 Action received: {action.name}")
+        print(f"📦 Action payload: {action.payload}")
+        print(f"📦 Action payload type: {type(action.payload)}")
+        
+        # Handle different payload formats
+        if isinstance(action.payload, dict):
+            latitude = action.payload.get("latitude")
+            longitude = action.payload.get("longitude")
+        else:
+            # Try to get from action directly
+            latitude = getattr(action.payload, "latitude", None)
+            longitude = getattr(action.payload, "longitude", None)
+        
+        print(f"📍 Extracted - Latitude: {latitude}, Longitude: {longitude}")
+        
+        if latitude is not None and longitude is not None:
+            # Convert to float if they're strings
+            try:
+                latitude = float(latitude)
+                longitude = float(longitude)
+            except (ValueError, TypeError) as e:
+                print(f"⚠️ Could not convert to float: {e}")
+                return
+            
+            cl.user_session.set("user_latitude", latitude)
+            cl.user_session.set("user_longitude", longitude)
+            print(f"✅ Location received and stored: ({latitude}, {longitude})")
+        else:
+            print(f"⚠️ Invalid location payload: {action.payload}")
+            print(f"⚠️ Latitude: {latitude}, Longitude: {longitude}")
+    except Exception as e:
+        print(f"❌ Error handling location action: {e}")
+        import traceback
+        traceback.print_exc()
+
 @cl.on_chat_start
-def init():
+async def init():
     #generate user session id for the session
     session_id = uuid.uuid4()
     cl.user_session.set("id",session_id)
@@ -71,6 +114,11 @@ def init():
     
     #define region
     cl.user_session.set("region_name",region_name)
+    
+    # Initialize location storage (will be set by action callback)
+    cl.user_session.set("user_latitude", None)
+    cl.user_session.set("user_longitude", None)
+    print("✅ Location session variables initialized")
 #create dynamodb instance
     dynamodb = boto3.resource("dynamodb", region_name=region_name)
     sts_client = boto3.client(
