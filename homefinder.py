@@ -67,6 +67,7 @@ class CustomDataLayer(cl_data.BaseDataLayer):
     async def update_thread(self, thread_id, name = None, user_id = None, metadata = None, tags = None):
         return await super().update_thread(thread_id, name, user_id, metadata, tags)
 
+cl_data._data_layer=CustomDataLayer()
 
 @cl.on_message
 async def on_starter(message: cl.Message):
@@ -143,7 +144,10 @@ def remove_PII(text):
     response = comprehend_client.detect_pii_entities(Text=text,LanguageCode=language_code)
     redacted_text = list(text)
     for entity in response['Entities']:
-        if entity['Type'] != 'ADDRESS' or entity['Type'] != "PHONE":
+        if entity['Type'] == 'ADDRESS' or entity['Type'] == "PHONE" or entity['Type'] == "NAME":
+            pass
+        else:
+            print(entity['Type'])
             for i in range(entity['BeginOffset'],entity['EndOffset']):
                 redacted_text[i] = '*'
     redacted_text = "".join(redacted_text)
@@ -151,7 +155,6 @@ def remove_PII(text):
 
 # SerpAPI function removed - now using TavilySearch
 
-cl_data._data_layer=CustomDataLayer()
 
 @cl.on_chat_start
 async def init():
@@ -178,7 +181,7 @@ async def init():
 
 # Create the Bedrock model instance
     model = ChatBedrockConverse(
-        model_id="amazon.nova-micro-v1:0",
+        model_id="amazon.nova-lite-v1:0",
         client=bedrock_client,
         region_name=region_name,
     )
@@ -205,14 +208,14 @@ async def init():
     
     retriever = AmazonKnowledgeBasesRetriever(
         knowledge_base_id="VWS7WOM9RG",
-        retrieval_config={"vectorSearchConfiguration": {"numberOfResults": 5}},
+        retrieval_config={"vectorSearchConfiguration": {"numberOfResults": 4}},
         region_name=region_name
     )
     
     kb_tool = create_retriever_tool(
         retriever,
         "KnowledgeBaseSearch",
-        "Searches for homeless resources and retrieves from Bedrock Knowledge Base"
+        "Searches for homeless resources and retrieves from Bedrock Knowledge Base. In order to return the response in the user selected language, specify using (Generate the answer in [USER_SPECIFIED_LANGUAGE]). So for example, if the user asks something in Spanish, you MUST include (Generate the answer in Spanish) in the query when calling the tool. The resources found must all be free, and/or of a low-cost if possible. "
     )
 
 #append created tools to list
@@ -227,7 +230,7 @@ async def init():
 #define agentic prompt - simplified and more conversational
     agent_prompt = ChatPromptTemplate.from_messages(
             [
-                ("system", f"You are HomeFinder, an empathetic AI assistant that helps people in the DFW area experiencing homelessness find resources. If the user's request is the word Emergency and nothing else, enquire about their situation. Recognize the user's language that they're speaking in (if it's hard to tell what language they're speaking in, the default language is English), and translate all your responses (and responses coming from any tools) during the conversation in the user speaking language. Before searching for resources, make sure you speak to the user empathetically about their situation, and when it seems clear that they just want the resources and not a detailed conversation about their needs, search for resources with the information you have. When searching for resources, send the search request in the language that the user is speaking in, use the knowledge base FIRST (ensure that the user provided parameters such as location adequately MATCH the resources in the knowledge base, don't just blatantly copy info from it), and if there's still any information still missing you can use the internet for current information. The resources returned must be as close as possible in either proximity and/or need to the user provided location/scenario. Be warm, understanding, and helpful. Ask follow-up questions to further refine your searches before using the internet or knowledge base (ie: location, more info about situation etc) to make it more of a personal experience. Focus on practical help like shelters, food, healthcare, and other essential services. Do a sentiment analysis on each user response and base your responses/resources on how the user seems to be feeling. Don't sound robotic, sound conversational. YOU MUST USE {resource_format} as your format for searching and showing the user the information you found.If the user has seemed to provide any personal identifiable information, kindly request them to not include anything as such (pii information you recieve should be donated by multiple *'s)"),                MessagesPlaceholder(variable_name="history"),
+                ("system", f"You are HomeFinder, an empathetic AI assistant that helps people in the DFW area (Dallas, Fort Worth, Arlington, Plano, Irving, Frisco, Garland, McKinney, Denton, Richardson, Grapevine) experiencing homelessness find resources. If the user's request is the word Emergency and nothing else, enquire about their situation. Recognize the user's language that they're speaking in and respond in that language (any time you use a tool such as the knowledge base or internet, tell the tool to 'generate the answer in [INSERT_USER_LANGUAGE]', and don't use English unless that's the user speaking language) during the conversation in the user speaking language. Make sure you speak to the user empathetically about their situation, and when it seems clear that they just want the resources and not a detailed conversation about their needs, search for resources with the information you have. When searching for resources, send the search request in the language that the user is speaking in, use the knowledge base FIRST (ensure that the user provided parameters such as location adequately MATCH the resources in the knowledge base, don't just blatantly copy info from it), and if there's still any information still missing use the internet for current information. The resources returned must be as close as possible in either proximity and/or need to the user provided location/scenario. Be warm, understanding, and helpful. Take the user's language into concern as well, and if possible, find shelters that support the language the user is speaking in (you can search the internet for this as well). Ask follow-up questions to further refine your searches (as well as after making and returning searches), using the internet or knowledge base (ie: location, more info about situation etc) to make it more of a personal experience. Focus on practical help like shelters, food, healthcare, and other essential services. Do a sentiment analysis on each user response and base your responses/resources on how the user seems to be feeling. Don't sound robotic, sound conversational. YOU MUST USE {resource_format} as your format for showing the user the information you found.If the user has seemed to provide any personal identifiable information, kindly request them to not include anything as such (pii information you recieve should be donated by multiple *'s). If the user isn't willing to share any details about their situation, DO NOT KEEP ASKING THEM. Respond as kind as possible, and be willing to discuss through the user's problems, only to guide them to the correct resources that they may need. Don't try to give any specific medical advice, but after the user has provided enough information to guide them to a specific resource, return those resources. "),                MessagesPlaceholder(variable_name="history"),
                 ("human", "{question}"),
                 ("system","{agent_scratchpad}")
             ]
@@ -235,7 +238,7 @@ async def init():
 #defining cleaning prompt
     cleaning_prompt = ChatPromptTemplate.from_template(
             "Here is the agent's response:\n\n{agent_response}\n\n"
-            "Extract and return ONLY the final user-facing answer, so remove all thinking, internal thoughts, processing, and debug info. Don't include any of your thinking either like \"here is the final answer\". Omit any characters (whether it's empty newline characters etc) that make the response less clear or messy to the user. Return it in properly formatted markdown (NO MARKDOWN BOX WITH PLAIN_TEXT) that can render neatly in a Chainlit frontend (similar to chatgpt)"
+            "Extract and return ONLY the final user-facing answer, so remove all thinking, internal thoughts, processing, and debug info. Don't include any of your thinking either like \"here is the final answer\". Omit any characters (whether it's empty newline characters etc) that make the response less clear or messy to the user. Return it in properly formatted markdown (NO MARKDOWN BOX WITH PLAIN_TEXT) that can render neatly in a Chainlit frontend (similar to chatgpt). Generate the final answer in the language that is in the 'question': 'QUESTION' field of the Agent response. For example, if the language that the question is in is Spanish, generate the answer you return in Spanish, which includes all resource descriptions and pretty much the entire text you get into Spanish (other than links). "
     )
 
 #define primary agent
@@ -294,7 +297,7 @@ async def main(message: cl.Message):
         #get the PII removed text
         pii_removed_message = remove_PII(message.content)
         response = agent_with_history.invoke({"question": str(pii_removed_message)}, config=config)
-        #print(f"DEBUG: Agent response: {response}")
+        print(f"DEBUG: Agent response: {response}")
         
         #send agent response to be cleaned into user text
         cleaned_response = cleaning_chain.invoke({"agent_response":str(response)})
@@ -314,6 +317,7 @@ def deleteHistory():
     dynamodb = boto3.resource("dynamodb", region_name=region_name)
     table = dynamodb.Table('SessionTable')
     response = table.delete_item(Key={'SessionId': user_id})
+    '''
     feedback = open('feedback.json','rb')
     
     msg = MIMEMultipart()
@@ -331,3 +335,5 @@ def deleteHistory():
 
     with open('feedback.json','w'):
         pass
+    '''
+    
