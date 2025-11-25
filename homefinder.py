@@ -15,6 +15,7 @@ from langchain_classic.agents.agent_toolkits.conversational_retrieval.tool impor
 import json
 from dotenv import load_dotenv
 from location_request import get_user_location
+from location_tools_langchain import get_user_location_tool, geocode_address_tool, search_nearby_tool, reset_location_cache
 
 region_name = "us-east-1"
 def get_secret_key(secret_name):
@@ -107,6 +108,9 @@ async def on_set_location(action: cl.Action):
 
 @cl.on_chat_start
 async def init():
+    # Reset location cache for new session
+    reset_location_cache()
+    
     #generate user session id for the session
     session_id = uuid.uuid4()
     cl.user_session.set("id",session_id)
@@ -135,7 +139,7 @@ async def init():
 
 # Create the Bedrock model instance
     model = ChatBedrockConverse(
-        model_id="amazon.nova-micro-v1:0",
+        model_id="amazon.nova-lite-v1:0",
         client=bedrock_client,
         region_name=region_name,
     )
@@ -175,6 +179,9 @@ async def init():
 #append created tools to list
     tools.append(kb_tool)
     tools.append(search_tool)
+    tools.append(get_user_location_tool)
+    tools.append(geocode_address_tool)
+    tools.append(search_nearby_tool)
 
 #define parser
     output_parser = StrOutputParser()
@@ -182,11 +189,51 @@ async def init():
     resource_format = "Name: , Street Address: , Offered Services: , Average Cost: ,  Phone Number: , Website Link: "
     
 #define agentic prompt - simplified and more conversational
+    system_prompt = f"""You are HomeFinder, an empathetic AI assistant that helps people in the DFW area experiencing homelessness find resources.
+
+LANGUAGE:
+- Recognize the user's language (default to English if unclear)
+- Translate all responses and tool outputs to the user's language
+
+CONVERSATION STYLE:
+- Be warm, understanding, and helpful - don't sound robotic
+- Speak empathetically about their situation before searching
+- When the user just wants resources quickly, search with available info
+- Ask follow-up questions to refine searches (location, situation details)
+- Do sentiment analysis and adapt responses to how user seems to be feeling
+
+SEARCHING FOR RESOURCES:
+- Use the knowledge base FIRST
+- Ensure user-provided location matches resources in knowledge base
+- Use internet search for missing/current information
+- Resources must be close in proximity and/or need to user's location/scenario
+- Focus on: shelters, food, healthcare, essential services
+
+OUTPUT FORMAT:
+- YOU MUST USE this format: {resource_format}
+
+PRIVACY:
+- If user provides PII, kindly ask them not to include it
+- Redact any PII received (show as multiple *'s)
+
+LOCATION TOOLS (CRITICAL - READ CAREFULLY):
+- For 'near me', 'nearby', 'closest to me': call get_user_location_tool exactly ONCE
+- AFTER calling get_user_location_tool, check the response:
+  * If it contains coordinates: proceed with search_nearby_tool
+  * If it says "error", "denied", "failed", or "ALREADY FAILED": DO NOT call get_user_location_tool again. Instead, IMMEDIATELY respond to the user with a friendly message asking for their location. Example: "I wasn't able to access your GPS. No worries though! Could you share a rough location - like a neighborhood, nearby intersection, or landmark? It doesn't have to be exact, any general area helps me find resources near you."
+- When user provides an address/location: use geocode_address_tool ONCE to convert to coordinates
+- If geocode returns "ALREADY GEOCODED": DO NOT call it again. Use the coordinates from the message.
+- After getting coordinates, use search_nearby_tool to find places
+- NEVER call the same tool twice in a row with the same parameters
+- If ANY tool response contains "STOP CALLING" or "ALREADY": immediately stop calling that tool and use the data provided
+"""
+
     agent_prompt = ChatPromptTemplate.from_messages(
             [
-                ("system", f"You are HomeFinder, an empathetic AI assistant that helps people in the DFW area experiencing homelessness find resources. Recognize the user's language that they're speaking in (if it's hard to tell what language they're speaking in, the default language is English), and translate all your responses (and responses coming from any tools) during the conversation in the user speaking language. Before searching for resources, make sure you speak to the user empathetically about their situation, and when it seems clear that they just want the resources and not a detailed conversation about their needs, search for resources with the information you have. When searching for resources, send the search request in the language that the user is speaking in, use the knowledge base FIRST (ensure that the user provided parameters such as location adequately MATCH the resources in the knowledge base, don't just blatantly copy info from it), and if there's still any information still missing you can use the internet for current information. The resources returned must be as close as possible in either proximity and/or need to the user provided location/scenario. Be warm, understanding, and helpful. Ask follow-up questions to further refine your searches before using the internet or knowledge base (ie: location, more info about situation etc) to make it more of a personal experience. Focus on practical help like shelters, food, healthcare, and other essential services. Do a sentiment analysis on each user response and base your responses/resources on how the user seems to be feeling. Don't sound robotic, sound conversational. YOU MUST USE {resource_format} as your format for searching and showing the user the information you found.If the user has seemed to provide any personal identifiable information, kindly request them to not include anything as such (pii information you recieve should be donated by multiple *'s)"),                MessagesPlaceholder(variable_name="history"),
+                ("system", system_prompt),
+                MessagesPlaceholder(variable_name="history"),
                 ("human", "{question}"),
-                ("system","{agent_scratchpad}")
+                ("system", "{agent_scratchpad}")
             ]
     )   
 #defining cleaning prompt
@@ -207,7 +254,7 @@ async def init():
             agent=internet_agent,
             tools=tools,
             verbose=True,  # Enable verbose for debugging
-            max_iterations=5,  # Limit iterations to prevent loops
+            max_iterations=3,  # Limit iterations to prevent loops
             max_execution_time=30,  # 30 second timeout
             return_intermediate_steps=True,  # Keep for debugging
             handle_parsing_errors=True,  # Handle parsing errors gracefully
@@ -248,7 +295,7 @@ async def main(message: cl.Message):
         
         #get the PII removed text
         pii_removed_message = remove_PII(message.content)
-        response = agent_with_history.invoke({"question": str(pii_removed_message)}, config=config)
+        response = await agent_with_history.ainvoke({"question": str(pii_removed_message)}, config=config)
         print(f"DEBUG: Agent response: {response}")
         
         #send agent response to be cleaned into user text
