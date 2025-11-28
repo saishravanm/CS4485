@@ -15,6 +15,33 @@ from langchain_classic.agents.agent_toolkits.conversational_retrieval.tool impor
 import json
 from dotenv import load_dotenv
 import re
+#from langchain.tools import tool, ToolRuntime
+from langchain_classic.agents import Tool
+
+elements = []
+
+def display_map(resource: dict) -> list:
+    """Return a maps widget as a cl.Message that displays the location of a resource (shelter, etc)
+    
+    Args:
+        resource: dictionary containing the argument as a key, mapped to the street address of the location as the value {"name": name, "streetAddress": addr} taken from the user specified resource. 
+    """
+    global elements
+    if resource:
+            maps_key = os.environ.get("GOOGLE_MAPS_API_KEY")
+            if maps_key:
+                print("MADE IT HERE!")
+                map_el = cl.CustomElement(
+                    name="ResourceMap", 
+                    props={"resources": [{"address":resource}], "googleMapsApiKey": maps_key},
+                    display="inline",  #show under the message
+                )
+                print("RESOURCES OBJECT: ", {"resources": {"address":resource}, "googleMapsApiKey": maps_key})
+                elements.append(map_el)
+                
+    
+    #print("MAP ELEMENTS: ", resources)
+    return elements
 
 def get_session_history(session_id):
     # Create boto3 session with credentials
@@ -82,7 +109,7 @@ def init():
 
 # Create the Bedrock model instance
     model = ChatBedrockConverse(
-        model_id="amazon.nova-micro-v1:0",
+        model_id="amazon.nova-lite-v1:0",
         client=bedrock_client,
         region_name=region_name,
     )
@@ -107,7 +134,11 @@ def init():
             topic="general",
             search_depth="advanced"
     )
-    
+    map_tool = Tool(
+        name='MapTool',
+        func=display_map,
+        description="Return a maps widget that displays the location of a resource (shelter, etc). input must be a dictionary with the word 'address' as the KEY, and the EXACT ADDRESS of the location as the value(pulled from the knowledge base) and not the name of the location, as the value taken from the user specified resource. For example, an example input value of resource is 'address:'123 Main St''. When you query for the address from the knowledge base, just use the name of the location to search and nothing else (for example, to search for the address of shelter named shelter1, just use the name shelter1) "
+    )
     retriever = AmazonKnowledgeBasesRetriever(
         knowledge_base_id="VWS7WOM9RG",
         retrieval_config={"vectorSearchConfiguration": {"numberOfResults": 5}},
@@ -122,6 +153,7 @@ def init():
 #append created tools to list
     tools.append(kb_tool)
     tools.append(search_tool)
+    tools.append(map_tool)
 
 #define parser
     output_parser = StrOutputParser()
@@ -131,7 +163,7 @@ def init():
 #define agentic prompt - simplified and more conversational
     agent_prompt = ChatPromptTemplate.from_messages(
             [
-                ("system", f"You are HomeFinder, an empathetic AI assistant that helps people in the DFW area experiencing homelessness find resources. Recognize the user's language that they're speaking in (if it's hard to tell what language they're speaking in, the default language is English), and translate all your responses (and responses coming from any tools) during the conversation in the user speaking language. Before searching for resources, make sure you speak to the user empathetically about their situation, and when it seems clear that they just want the resources and not a detailed conversation about their needs, search for resources with the information you have. When searching for resources, send the search request in the language that the user is speaking in, use the knowledge base FIRST (ensure that the user provided parameters such as location adequately MATCH the resources in the knowledge base, don't just blatantly copy info from it), and if there's still any information still missing you can use the internet for current information. The resources returned must be as close as possible in either proximity and/or need to the user provided location/scenario. Be warm, understanding, and helpful. Ask follow-up questions to further refine your searches before using the internet or knowledge base (ie: location, more info about situation etc) to make it more of a personal experience. Focus on practical help like shelters, food, healthcare, and other essential services. Do a sentiment analysis on each user response and base your responses/resources on how the user seems to be feeling. Don't sound robotic, sound conversational. YOU MUST USE {resource_format} as your format for searching and showing the user the information you found.If the user has seemed to provide any personal identifiable information, kindly request them to not include anything as such (pii information you recieve should be donated by multiple *'s)"),                MessagesPlaceholder(variable_name="history"),
+                ("system", f"You are HomeFinder, an empathetic AI assistant that helps people in the DFW area experiencing homelessness find resources. Recognize the user's language that they're speaking in (if it's hard to tell what language they're speaking in, the default language is English), and translate all your responses (and responses coming from any tools) during the conversation in the user speaking language. Before searching for resources, make sure you speak to the user empathetically about their situation, and when it seems clear that they just want the resources and not a detailed conversation about their needs, search for resources with the information you have. When searching for resources, send the search request in the language that the user is speaking in, use the knowledge base FIRST (ensure that the user provided parameters such as location adequately MATCH the resources in the knowledge base, don't just blatantly copy info from it), and if there's still any information still missing you can use the internet for current information. The resources returned must be as close as possible in either proximity and/or need to the user provided location/scenario. Be warm, understanding, and helpful. Ask follow-up questions to further refine your searches before using the internet or knowledge base (ie: location, more info about situation etc) to make it more of a personal experience. Focus on practical help like shelters, food, healthcare, and other essential services. Do a sentiment analysis on each user response and base your responses/resources on how the user seems to be feeling. Don't sound robotic, sound conversational. YOU MUST USE {resource_format} as your format for searching and showing the user the information you found.If the user has seemed to provide any personal identifiable information, kindly request them to not include anything as such (pii information you recieve should be donated by multiple *'s). You have a tool called MapTool that lets you return the map of a location the user specifies as a widget. If the user asks for a map, that means they are asking for a widget."),                MessagesPlaceholder(variable_name="history"),
                 ("human", "{question}"),
                 ("system","{agent_scratchpad}")
             ]
@@ -154,7 +186,7 @@ def init():
             agent=internet_agent,
             tools=tools,
             verbose=True,  # Enable verbose for debugging
-            max_iterations=5,  # Limit iterations to prevent loops
+            max_iterations=1,  # Limit iterations to prevent loops
             max_execution_time=30,  # 30 second timeout
             return_intermediate_steps=True,  # Keep for debugging
             handle_parsing_errors=True,  # Handle parsing errors gracefully
@@ -171,7 +203,7 @@ def init():
         get_session_history=get_session_history,
         input_messages_key="question",
         history_messages_key="history",
-        output_parser=output_parser
+        output_parser=output_parser,
         )
     
     cl.user_session.set("cleaning_layer",cleaning_chain)
@@ -191,7 +223,9 @@ def extract_resources(text: str):
         if addr:
             resources.append({"name": name, "streetAddress": addr})
     return resources
-        
+
+
+
 @cl.on_message
 async def main(message: cl.Message):
     
@@ -204,32 +238,20 @@ async def main(message: cl.Message):
     
     try:
         #get agent response with debugging
-        print(f"DEBUG: User message: {message.content}")
+        #print(f"DEBUG: User message: {message.content}")
         
         #get the PII removed text
         pii_removed_message = remove_PII(message.content)
         response = agent_with_history.invoke({"question": str(pii_removed_message)}, config=config)
-        print(f"DEBUG: Agent response: {response}")
+        #print(f"DEBUG: Agent response: {response}")
         
         #send agent response to be cleaned into user text
-        cleaned_response = cleaning_chain.invoke({"agent_response":str(response)})
-        print(f"DEBUG: Cleaned response: {cleaned_response}")
-        
-        #map integration; extract resources & build map element
-        resources = extract_resources(cleaned_response)
-        elements = []
-
-        if resources:
-            maps_key = os.environ.get("GOOGLE_MAPS_API_KEY")
-            if maps_key:
-                map_el = cl.CustomElement(
-                    name="ResourceMap",
-                    props={"resources": resources, "googleMapsApiKey": maps_key},
-                    display="inline",  #show under the message
-                )
-                elements.append(map_el)
-                
+        cleaned_response = await cleaning_chain.ainvoke({"agent_response":str(response)})
+        #print(f"DEBUG: Cleaned response: {cleaned_response}")
+        print("ELEMENTS AFTER ", elements)
+        #map integration; extract resources & build map element                
         await cl.Message(content=cleaned_response, elements=elements).send()
+        elements.clear()
         
     except Exception as e:
         print(f"DEBUG: Error occurred: {str(e)}")
