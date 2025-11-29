@@ -34,16 +34,32 @@ from location_tools_langchain import (
 from location_store import store_session_location, clear_session_location, geocode_and_store
 
 region_name = "us-east-1"
+current_llm_message = ""
+dynamodb = boto3.resource("dynamodb", region_name=region_name)
+global_session_id = "" 
 
 class CustomDataLayer(cl_data.BaseDataLayer):
     async def upsert_feedback(self, feedback):
-        filename = "feedback.json"
+        feedback_table = dynamodb.Table("user_feedback")
         data = {
+         "llm_message":current_llm_message,
          "sentiment":feedback.value,
          "feedback":feedback.comment,   
         }
-        with open(filename, "a") as file: 
-            json.dump(data,file,indent=4)
+        item_key = {
+            'SessionId':global_session_id
+        }
+        feedback_table.update_item(
+            Key=item_key,
+            UpdateExpression="SET #feedbackList = list_append(if_not_exists(#feedbackList, :empty_list),:val)",
+            ExpressionAttributeNames={
+                '#feedbackList':'feedbackList'
+            },
+            ExpressionAttributeValues={
+                ':val':[data],
+                ':empty_list': []
+            },
+        )
         return await super().upsert_feedback(feedback)
     
     async def build_debug_url(self):
@@ -218,7 +234,8 @@ async def init():
     session_id = str(uuid.uuid4())
     cl.user_session.set("id", session_id)
     print(f"New session started: {session_id}")
-    
+    global global_session_id
+    global_session_id = session_id
     #define region
     cl.user_session.set("region_name",region_name)
     
@@ -227,7 +244,6 @@ async def init():
     cl.user_session.set("user_longitude", None)
     print("Location session variables initialized")
 #create dynamodb instance
-    dynamodb = boto3.resource("dynamodb", region_name=region_name)
     sts_client = boto3.client(
         'sts',
         region_name=region_name
@@ -510,11 +526,8 @@ async def main(message: cl.Message):
         # Get the PII removed text
         pii_removed_message = remove_PII(message.content)
         
-        #send agent response to be cleaned into user text
-        cleaned_response = cleaning_chain.invoke({"agent_response":str(response)})
         #print(f"DEBUG: Cleaned response: {cleaned_response}")
-        cl.user_session.set("current_llm_message",cleaned_response)
-        await cl.Message(content=cleaned_response).send()
+        
         # Check if we're waiting for an address (GPS failed, user providing location)
         if is_waiting_for_address(session_id):
             print(f"DEBUG: Waiting for address - treating message as location")
@@ -538,13 +551,13 @@ async def main(message: cl.Message):
                 if search_result["status"] == "success":
                     formatted = format_results_for_user(search_result)
                     enhanced_question = f"""The user asked for: "{pending_query}"
-Their location: {pii_removed_message}
+                        Their location: {pii_removed_message}
 
-I found these results near them:
+                        I found these results near them:
 
-{formatted}
+                        {formatted}
 
-Please present these results warmly and helpfully."""
+                        Please present these results warmly and helpfully."""
                     
                     response = await agent_with_history.ainvoke({"question": enhanced_question}, config=config)
                     cleaned_response = cleaning_chain.invoke({"agent_response": str(response)})
@@ -588,11 +601,11 @@ Please present these results warmly and helpfully."""
                 # Let the agent add context/empathy to the results
                 enhanced_question = f"""The user asked: "{pii_removed_message}"
 
-I found these results near them:
+                    I found these results near them:
 
-{formatted}
+                    {formatted}
 
-Please present these results to the user in a warm, helpful way. Add any relevant context about the resources if you have knowledge about them."""
+                    Please present these results to the user in a warm, helpful way. Add any relevant context about the resources if you have knowledge about them."""
                 
                 response = await agent_with_history.ainvoke({"question": enhanced_question}, config=config)
                 cleaned_response = cleaning_chain.invoke({"agent_response": str(response)})
@@ -607,6 +620,8 @@ Please present these results to the user in a warm, helpful way. Add any relevan
             
             cleaned_response = cleaning_chain.invoke({"agent_response": str(response)})
             print(f"DEBUG: Cleaned response: {cleaned_response}")
+            global current_llm_message
+            current_llm_message = cleaned_response
             await cl.Message(content=cleaned_response).send()
         
     except Exception as e:
@@ -628,25 +643,5 @@ def deleteHistory():
         reset_location_state(str(user_id))
     
     # Clear DynamoDB history
-    dynamodb = boto3.resource("dynamodb", region_name=region_name)
     table = dynamodb.Table('SessionTable')
-    '''
-    feedback = open('feedback.json','rb')
-    
-    msg = MIMEMultipart()
-        
-    server = smtplib.SMTP("smtp.gmail.com",587)
-    server.starttls()
-    server.login("homefinder316@gmail.com", "oaiqmqpfgxbxibrw")
-    
-    attachment_package = MIMEBase('application','octet-stream')
-    attachment_package.set_payload((feedback).read())
-    encoders.encode_base64(attachment_package)
-    attachment_package.add_header('Content-Disposition',"attachment; filename=feedback.json")
-    msg.attach(attachment_package)
-    server.sendmail("homefinder316@gmail.com","saishravanm@gmail.com",msg.as_string())
-
-    with open('feedback.json','w'):
-        pass
-    '''
     response = table.delete_item(Key={'SessionId': str(user_id)})
