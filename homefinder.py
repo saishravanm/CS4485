@@ -1,8 +1,10 @@
 import chainlit as cl
 import uuid
 import boto3
+import re
 from langchain_aws import ChatBedrockConverse
 import os
+from typing import Optional
 from langchain_core.output_parsers import StrOutputParser
 from langchain_tavily import TavilySearch
 from langchain_classic.agents import create_tool_calling_agent, AgentExecutor
@@ -14,8 +16,16 @@ from langchain_aws.retrievers import AmazonKnowledgeBasesRetriever
 from langchain_classic.agents.agent_toolkits.conversational_retrieval.tool import create_retriever_tool
 import json
 from dotenv import load_dotenv
-from location_request import get_user_location
-from location_tools_langchain import get_user_location_tool, geocode_address_tool, search_nearby_tool, reset_location_cache
+from location_tools_langchain import (
+    reset_location_state,
+    ensure_location,
+    search_resources,
+    format_results_for_user,
+    set_pending_query,
+    get_pending_query,
+    is_waiting_for_address
+)
+from location_store import store_session_location, clear_session_location, geocode_and_store
 
 region_name = "us-east-1"
 def get_secret_key(secret_name):
@@ -71,9 +81,9 @@ async def on_set_location(action: cl.Action):
     Receives location coordinates from location.js and stores in user session
     """
     try:
-        print(f"🔔 Action received: {action.name}")
-        print(f"📦 Action payload: {action.payload}")
-        print(f"📦 Action payload type: {type(action.payload)}")
+        print(f"Action received: {action.name}")
+        print(f"Action payload: {action.payload}")
+        print(f"Action payload type: {type(action.payload)}")
         
         # Handle different payload formats
         if isinstance(action.payload, dict):
@@ -84,7 +94,7 @@ async def on_set_location(action: cl.Action):
             latitude = getattr(action.payload, "latitude", None)
             longitude = getattr(action.payload, "longitude", None)
         
-        print(f"📍 Extracted - Latitude: {latitude}, Longitude: {longitude}")
+        print(f"Extracted - Latitude: {latitude}, Longitude: {longitude}")
         
         if latitude is not None and longitude is not None:
             # Convert to float if they're strings
@@ -92,29 +102,29 @@ async def on_set_location(action: cl.Action):
                 latitude = float(latitude)
                 longitude = float(longitude)
             except (ValueError, TypeError) as e:
-                print(f"⚠️ Could not convert to float: {e}")
+                print(f"Could not convert to float: {e}")
                 return
             
             cl.user_session.set("user_latitude", latitude)
             cl.user_session.set("user_longitude", longitude)
-            print(f"✅ Location received and stored: ({latitude}, {longitude})")
+            print(f"Location received and stored: ({latitude}, {longitude})")
         else:
-            print(f"⚠️ Invalid location payload: {action.payload}")
-            print(f"⚠️ Latitude: {latitude}, Longitude: {longitude}")
+            print(f"Invalid location payload: {action.payload}")
+            print(f"Latitude: {latitude}, Longitude: {longitude}")
     except Exception as e:
-        print(f"❌ Error handling location action: {e}")
+        print(f"Error handling location action: {e}")
         import traceback
         traceback.print_exc()
 
 @cl.on_chat_start
 async def init():
-    # Reset location cache for new session
-    reset_location_cache()
+    # Reset location state for new session
+    reset_location_state()
     
-    #generate user session id for the session
-    session_id = uuid.uuid4()
-    cl.user_session.set("id",session_id)
-    session_id = cl.user_session.get("id")
+    # Generate user session id for the session
+    session_id = str(uuid.uuid4())
+    cl.user_session.set("id", session_id)
+    print(f"New session started: {session_id}")
     
     #define region
     cl.user_session.set("region_name",region_name)
@@ -122,7 +132,7 @@ async def init():
     # Initialize location storage (will be set by action callback)
     cl.user_session.set("user_latitude", None)
     cl.user_session.set("user_longitude", None)
-    print("✅ Location session variables initialized")
+    print("Location session variables initialized")
 #create dynamodb instance
     dynamodb = boto3.resource("dynamodb", region_name=region_name)
     sts_client = boto3.client(
@@ -137,12 +147,13 @@ async def init():
         region_name=region_name,
     )
 
-# Create the Bedrock model instance
+# Create the Bedrock model instance (main agent)
     model = ChatBedrockConverse(
         model_id="amazon.nova-lite-v1:0",
         client=bedrock_client,
         region_name=region_name,
     )
+    
     
     tools = []
     # Create boto3 session with credentials
@@ -176,19 +187,16 @@ async def init():
         "Searches for homeless resources and retrieves from Bedrock Knowledge Base"
     )
 
-#append created tools to list
+# Append tools - NO location tools, those are handled automatically
     tools.append(kb_tool)
     tools.append(search_tool)
-    tools.append(get_user_location_tool)
-    tools.append(geocode_address_tool)
-    tools.append(search_nearby_tool)
 
 #define parser
     output_parser = StrOutputParser()
 
     resource_format = "Name: , Street Address: , Offered Services: , Average Cost: ,  Phone Number: , Website Link: "
     
-#define agentic prompt - simplified and more conversational
+# Simplified prompt - location is handled automatically by the system
     system_prompt = f"""You are HomeFinder, an empathetic AI assistant that helps people in the DFW area experiencing homelessness find resources.
 
 LANGUAGE:
@@ -197,35 +205,29 @@ LANGUAGE:
 
 CONVERSATION STYLE:
 - Be warm, understanding, and helpful - don't sound robotic
-- Speak empathetically about their situation before searching
-- When the user just wants resources quickly, search with available info
-- Ask follow-up questions to refine searches (location, situation details)
-- Do sentiment analysis and adapt responses to how user seems to be feeling
+- Speak empathetically about their situation
+- When the user wants resources quickly, help them efficiently
+- Ask follow-up questions to refine searches if needed
 
 SEARCHING FOR RESOURCES:
-- Use the knowledge base FIRST
-- Ensure user-provided location matches resources in knowledge base
-- Use internet search for missing/current information
-- Resources must be close in proximity and/or need to user's location/scenario
+- Use the knowledge base FIRST for homeless resources
+- Use internet search for additional/current information
 - Focus on: shelters, food, healthcare, essential services
 
 OUTPUT FORMAT:
-- YOU MUST USE this format: {resource_format}
+- Present resources clearly with: Name, Address, Services, Phone, Website
+- Use this format when available: {resource_format}
 
 PRIVACY:
 - If user provides PII, kindly ask them not to include it
 - Redact any PII received (show as multiple *'s)
 
-LOCATION TOOLS (CRITICAL - READ CAREFULLY):
-- For 'near me', 'nearby', 'closest to me': call get_user_location_tool exactly ONCE
-- AFTER calling get_user_location_tool, check the response:
-  * If it contains coordinates: proceed with search_nearby_tool
-  * If it says "error", "denied", "failed", or "ALREADY FAILED": DO NOT call get_user_location_tool again. Instead, IMMEDIATELY respond to the user with a friendly message asking for their location. Example: "I wasn't able to access your GPS. No worries though! Could you share a rough location - like a neighborhood, nearby intersection, or landmark? It doesn't have to be exact, any general area helps me find resources near you."
-- When user provides an address/location: use geocode_address_tool ONCE to convert to coordinates
-- If geocode returns "ALREADY GEOCODED": DO NOT call it again. Use the coordinates from the message.
-- After getting coordinates, use search_nearby_tool to find places
-- NEVER call the same tool twice in a row with the same parameters
-- If ANY tool response contains "STOP CALLING" or "ALREADY": immediately stop calling that tool and use the data provided
+LOCATION HANDLING:
+- Location searches are handled AUTOMATICALLY by the system
+- If the user asks for something "near me", the system will get their GPS automatically
+- If the user provides an address, the system will geocode it automatically
+- You will receive search results directly - just present them nicely to the user
+- If you receive a message saying "need location", ask the user for their general area
 """
 
     agent_prompt = ChatPromptTemplate.from_messages(
@@ -254,7 +256,7 @@ LOCATION TOOLS (CRITICAL - READ CAREFULLY):
             agent=internet_agent,
             tools=tools,
             verbose=True,  # Enable verbose for debugging
-            max_iterations=3,  # Limit iterations to prevent loops
+            max_iterations=8,  # Increased to allow multiple tool calls (location + search)
             max_execution_time=30,  # 30 second timeout
             return_intermediate_steps=True,  # Keep for debugging
             handle_parsing_errors=True,  # Handle parsing errors gracefully
@@ -279,40 +281,240 @@ LOCATION TOOLS (CRITICAL - READ CAREFULLY):
 
 
         
+# Multi-language "near me" patterns for location query detection
+# Priority: English, Spanish, Chinese, Arabic
+NEAR_ME_PATTERNS = [
+    # English
+    'near me', 'nearby', 'closest', 'close to me', 'around me', 'in my area',
+    'near my location', 'close by', 'nearest',
+    # Spanish
+    'cerca de mí', 'cerca de mi', 'cercano', 'cercana', 'cerca de aquí',
+    'cerca de aqui', 'en mi área', 'en mi area', 'próximo', 'proximo',
+    # Chinese (Simplified)
+    '附近', '靠近我', '离我近', '我附近', '周围',
+    # Chinese (Traditional)
+    '靠近我', '離我近',
+    # Arabic
+    'بالقرب مني', 'قريب مني', 'بجواري', 'حولي', 'في منطقتي',
+]
+
+# Patterns that indicate "near [specific address]"
+NEAR_ADDRESS_PATTERNS = [
+    # English
+    r'near\s+(?!me|my|here)(.+?)(?:\?|$|\.|\s+that|\s+which)',
+    # Spanish  
+    r'cerca\s+de\s+(?!mí|mi|aquí|aqui)(.+?)(?:\?|$|\.)',
+    # Chinese
+    r'(?:在|靠近)\s*(.+?)\s*(?:附近|周围)',
+    # Arabic
+    r'(?:بالقرب من|قريب من)\s+(.+?)(?:\?|$|\.)',
+]
+
+# Common prefixes to strip when extracting search term
+SEARCH_PREFIXES = [
+    # English
+    'find me a', 'find me', 'find a', 'find', 'search for a', 'search for',
+    'look for a', 'look for', 'where is a', 'where is', 'where are',
+    'show me a', 'show me', 'i need a', 'i need', 'get me a', 'get me',
+    'looking for a', 'looking for',
+    # Spanish
+    'encuentra', 'encontrar', 'busca', 'buscar', 'dónde está', 'donde esta',
+    'dónde hay', 'donde hay', 'necesito', 'muéstrame', 'muestrame',
+    # Chinese
+    '找', '搜索', '查找', '我要找', '我想找', '帮我找',
+    # Arabic
+    'أجد', 'ابحث عن', 'أين', 'أريد', 'أحتاج',
+]
+
+
+def detect_location_query(text: str, model=None) -> tuple[bool, Optional[str], Optional[str]]:
+    """
+    Detect if query needs location using keyword matching.
+    Supports English, Spanish, Chinese, Arabic.
+    Returns: (is_location_query, search_query, user_address)
+    
+    Note: model parameter kept for backwards compatibility but not used.
+    """
+    text_lower = text.lower()
+    
+    # Check for "near me" type patterns (no specific address)
+    is_near_me = any(pattern in text_lower for pattern in NEAR_ME_PATTERNS)
+    
+    # Check for "near [address]" patterns
+    user_address = None
+    if not is_near_me:
+        for pattern in NEAR_ADDRESS_PATTERNS:
+            match = re.search(pattern, text_lower, re.IGNORECASE)
+            if match:
+                potential_address = match.group(1).strip()
+                if potential_address and len(potential_address) > 2:
+                    user_address = potential_address
+                    break
+    
+    # If neither pattern matched, not a location query
+    if not is_near_me and not user_address:
+        return (False, None, None)
+    
+    # Extract search term by removing prefixes and location phrases
+    search_term = text_lower
+    
+    # Remove common prefixes
+    for prefix in SEARCH_PREFIXES:
+        if search_term.startswith(prefix):
+            search_term = search_term[len(prefix):].strip()
+            break
+    
+    # Remove "near me" type suffixes
+    for pattern in NEAR_ME_PATTERNS:
+        if pattern in search_term:
+            search_term = search_term.replace(pattern, '').strip()
+    
+    # Remove "near [address]" if present
+    if user_address:
+        for pattern in NEAR_ADDRESS_PATTERNS:
+            search_term = re.sub(pattern, '', search_term, flags=re.IGNORECASE).strip()
+    
+    # Clean up punctuation and extra spaces
+    search_term = re.sub(r'[?!.,]+$', '', search_term).strip()
+    search_term = re.sub(r'\s+', ' ', search_term).strip()
+    
+    # If search term is empty or too short, set to None
+    if not search_term or len(search_term) < 2:
+        search_term = None
+    
+    print(f"DEBUG: Location query detected - near_me={is_near_me}, search='{search_term}', address={user_address}")
+    return (True, search_term, user_address)
+
+
 @cl.on_message
 async def main(message: cl.Message):
-    
-    #retrieve agent and cleaning chains
+    # Retrieve agent and cleaning chain
     agent_with_history = cl.user_session.get("agent_with_history")
     cleaning_chain = cl.user_session.get("cleaning_layer")
-
-    #grab user session id
-    config = {"configurable": {"session_id": cl.user_session.get("id")}}
+    session_id = cl.user_session.get("id")
+    
+    # Grab user session id
+    config = {"configurable": {"session_id": session_id}}
     
     try:
-        #get agent response with debugging
         print(f"DEBUG: User message: {message.content}")
         
-        #get the PII removed text
+        # Get the PII removed text
         pii_removed_message = remove_PII(message.content)
-        response = await agent_with_history.ainvoke({"question": str(pii_removed_message)}, config=config)
-        print(f"DEBUG: Agent response: {response}")
         
-        #send agent response to be cleaned into user text
-        cleaned_response = cleaning_chain.invoke({"agent_response":str(response)})
-        print(f"DEBUG: Cleaned response: {cleaned_response}")
-        await cl.Message(content=cleaned_response).send()
+        # Check if we're waiting for an address (GPS failed, user providing location)
+        if is_waiting_for_address(session_id):
+            print(f"DEBUG: Waiting for address - treating message as location")
+            pending_query = get_pending_query(session_id)
+            
+            # Try to geocode the user's message as an address
+            geocode_result = geocode_and_store(session_id, pii_removed_message)
+            
+            if geocode_result:
+                lat, lng = geocode_result
+                print(f"DEBUG: Geocoded address to ({lat}, {lng})")
+                
+                # Now search with the pending query
+                search_term = pending_query or "resources"
+                print(f"DEBUG: Searching for '{search_term}' at ({lat}, {lng})")
+                search_result = search_resources(session_id, search_term)
+                
+                # Clear pending query
+                set_pending_query(session_id, None)
+                
+                if search_result["status"] == "success":
+                    formatted = format_results_for_user(search_result)
+                    enhanced_question = f"""The user asked for: "{pending_query}"
+Their location: {pii_removed_message}
+
+I found these results near them:
+
+{formatted}
+
+Please present these results warmly and helpfully."""
+                    
+                    response = await agent_with_history.ainvoke({"question": enhanced_question}, config=config)
+                    cleaned_response = cleaning_chain.invoke({"agent_response": str(response)})
+                    await cl.Message(content=cleaned_response).send()
+                else:
+                    await cl.Message(content=search_result["message"]).send()
+                return
+            else:
+                # Geocoding failed - ask for a clearer address
+                await cl.Message(content=f"I couldn't find that location. Could you try a more specific address? For example: 'Main Street, Dallas' or '75201'.").send()
+                return
+        
+        # Detect location intent using keyword matching (supports EN/ES/ZH/AR)
+        is_location_query, search_query, user_address = detect_location_query(pii_removed_message)
+        
+        if is_location_query:
+            print(f"DEBUG: Location query detected - query: '{search_query}', address: {user_address}")
+            
+            # Ensure we have a location
+            location_result = await ensure_location(session_id, user_address)
+            
+            if location_result["status"] == "need_address":
+                # Store the pending query so we can use it when user provides address
+                set_pending_query(session_id, search_query)
+                await cl.Message(content=location_result["message"]).send()
+                return
+            
+            if location_result["status"] == "error":
+                await cl.Message(content=location_result["message"]).send()
+                return
+            
+            # We have a location - search using natural language query
+            search_term = search_query or "resources"  # Default if no query extracted
+            print(f"DEBUG: Searching for '{search_term}' at ({location_result['lat']}, {location_result['lng']})")
+            search_result = search_resources(session_id, search_term)
+            
+            if search_result["status"] == "success":
+                # Format and send results
+                formatted = format_results_for_user(search_result)
+                
+                # Let the agent add context/empathy to the results
+                enhanced_question = f"""The user asked: "{pii_removed_message}"
+
+I found these results near them:
+
+{formatted}
+
+Please present these results to the user in a warm, helpful way. Add any relevant context about the resources if you have knowledge about them."""
+                
+                response = await agent_with_history.ainvoke({"question": enhanced_question}, config=config)
+                cleaned_response = cleaning_chain.invoke({"agent_response": str(response)})
+                await cl.Message(content=cleaned_response).send()
+            else:
+                # No results - let the agent help
+                await cl.Message(content=search_result["message"]).send()
+        else:
+            # Not a location query - use the agent normally
+            response = await agent_with_history.ainvoke({"question": str(pii_removed_message)}, config=config)
+            print(f"DEBUG: Agent response: {response}")
+            
+            cleaned_response = cleaning_chain.invoke({"agent_response": str(response)})
+            print(f"DEBUG: Cleaned response: {cleaned_response}")
+            await cl.Message(content=cleaned_response).send()
         
     except Exception as e:
         print(f"DEBUG: Error occurred: {str(e)}")
-        await cl.Message(content=f"I'm sorry, I encountered an error: {str(e)}. Please try again or rephrase your question.").send()
+        import traceback
+        traceback.print_exc()
+        await cl.Message(content=f"I'm sorry, I encountered an error. Please try again or rephrase your question.").send()
 
 
-#implement function to delete history after session ends (user refreshes or clicks off)
+# Implement function to delete history after session ends (user refreshes or clicks off)
 @cl.on_chat_end
 def deleteHistory():
     user_id = cl.user_session.get('id')
     region_name = cl.user_session.get('region_name')
+    
+    # Clear session location and state
+    if user_id:
+        clear_session_location(str(user_id))
+        reset_location_state(str(user_id))
+    
+    # Clear DynamoDB history
     dynamodb = boto3.resource("dynamodb", region_name=region_name)
     table = dynamodb.Table('SessionTable')
-    response = table.delete_item(Key={'SessionId': user_id})
+    response = table.delete_item(Key={'SessionId': str(user_id)})

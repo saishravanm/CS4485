@@ -22,6 +22,16 @@ except ImportError:
 # Always import requests for Places API (New) calls
 import requests
 
+# Text search cache: (query, lat_rounded, lng_rounded, radius) -> results
+# Rounds lat/lng to 3 decimals (~111m precision) for cache hits on nearby locations
+_text_search_cache: dict[tuple, list] = {}
+
+
+def clear_text_search_cache():
+    """Clear the text search cache. Call at start of new session if needed."""
+    global _text_search_cache
+    _text_search_cache = {}
+
 
 def get_google_api_key() -> Optional[str]:
     """
@@ -102,80 +112,70 @@ def geocode_address_google(address: str, api_key: Optional[str] = None) -> Optio
     return None
 
 
-def search_nearby_places(
+def text_search_places(
+    query: str,
     latitude: float,
     longitude: float,
     radius: int = 5000,
-    included_types: Optional[List[str]] = None,
-    max_results: int = 20,
-    rank_by: str = "DISTANCE",
+    max_results: int = 10,
     api_key: Optional[str] = None
 ) -> Optional[List[Dict]]:
     """
-    Search for places near a location using Google Places API (New) nearby search endpoint.
+    Search for places using natural language query near a location.
+    Uses Google Places Text Search (New) API - accepts queries like "goodwill", "food bank", etc.
+    Results are cached to avoid redundant API calls.
     
     Args:
+        query: Natural language search query (e.g., "goodwill", "food bank", "homeless shelter")
         latitude: Center latitude for the search
         longitude: Center longitude for the search
-        radius: Search radius in meters (max 50,000, default: 5000)
-        included_types: Optional list of place types to filter (e.g., ["shelter", "food_bank"])
-                       If None, returns all types. See: https://developers.google.com/maps/documentation/places/web-service/place-types
-        max_results: Maximum number of results to return (default: 20, max: 20)
-        rank_by: How to rank results - "DISTANCE" or "POPULARITY" (default: "DISTANCE")
+        radius: Search radius in meters (default: 5000)
+        max_results: Maximum number of results to return (default: 10, max: 20)
         api_key: Google API key (if None, will try to get from env)
     
     Returns:
-        List of dictionaries, each containing:
-        - place_id: Google place ID
-        - name: Place name
-        - address: Formatted address
-        - location: Dict with 'latitude' and 'longitude'
-        - types: List of place types
-        - rating: Rating (if available)
-        - user_rating_count: Number of ratings (if available)
-        - phone: Phone number (if available)
-        - website: Website URL (if available)
-        - business_status: Business status (OPERATIONAL, CLOSED_PERMANENTLY, etc.)
-        Returns None if search fails
+        List of place dictionaries, or None if search fails
     """
+    global _text_search_cache
+    
     if api_key is None:
         api_key = get_google_api_key()
     
     if not api_key:
-        raise ValueError("Google API key not found. Set GOOGLE_PLACES_API_KEY or GOOGLE_MAPS_API_KEY in .env")
+        raise ValueError("Google API key not found")
     
-    # Validate radius
-    if radius > 50000:
-        radius = 50000
-        print(f"⚠️ Radius capped at 50,000 meters (max allowed)")
-    
-    # Validate max_results
+    # Cap max_results at 20
     if max_results > 20:
         max_results = 20
-        print(f"⚠️ Max results capped at 20 (max allowed)")
     
-    # Validate rank_by
-    if rank_by not in ["DISTANCE", "POPULARITY"]:
-        rank_by = "DISTANCE"
-        print(f"⚠️ Invalid rank_by, using 'DISTANCE'")
+    # Create cache key - normalize query and round coordinates
+    cache_key = (
+        query.lower().strip(),
+        round(latitude, 3),  # ~111m precision
+        round(longitude, 3),
+        radius,
+        max_results
+    )
     
-    url = "https://places.googleapis.com/v1/places:searchNearby"
+    # Check cache first
+    if cache_key in _text_search_cache:
+        cached = _text_search_cache[cache_key]
+        print(f"Cache hit for '{query}' - returning {len(cached)} cached results")
+        return cached
     
-    # Field mask specifies which fields to return (required by Places API New)
-    # Using '*' for all fields, or specify specific fields like:
-    # "places.id,places.displayName,places.formattedAddress,places.location,places.types,places.rating,places.userRatingCount,places.nationalPhoneNumber,places.websiteUri,places.businessStatus,places.priceLevel"
-    field_mask = "places.id,places.displayName,places.formattedAddress,places.location,places.types,places.rating,places.userRatingCount,places.nationalPhoneNumber,places.websiteUri,places.businessStatus,places.priceLevel"
+    # Build the request
+    url = "https://places.googleapis.com/v1/places:searchText"
     
     headers = {
+        "Content-Type": "application/json",
         "X-Goog-Api-Key": api_key,
-        "X-Goog-FieldMask": field_mask,
-        "Content-Type": "application/json"
+        "X-Goog-FieldMask": "places.displayName,places.formattedAddress,places.location,places.types,places.rating,places.userRatingCount,places.nationalPhoneNumber,places.websiteUri,places.businessStatus"
     }
     
-    # Build request body
+    # Request body with location bias
     body = {
-        "maxResultCount": max_results,
-        "locationRestriction": {
+        "textQuery": query,
+        "locationBias": {
             "circle": {
                 "center": {
                     "latitude": latitude,
@@ -184,53 +184,44 @@ def search_nearby_places(
                 "radius": float(radius)
             }
         },
-        "rankPreference": rank_by
+        "maxResultCount": max_results
     }
-    
-    # Add included types if provided
-    if included_types:
-        body["includedTypes"] = included_types
     
     try:
         response = requests.post(url, headers=headers, json=body, timeout=10)
         response.raise_for_status()
+        
         data = response.json()
         
+        if "places" not in data:
+            print(f"No places found for query: {query}")
+            # Cache empty results to avoid repeated API calls
+            _text_search_cache[cache_key] = []
+            return []
+        
+        # Format results
         places = []
-        for place in data.get("places", []):
-            # Extract location
-            location_data = place.get("location", {})
-            location = None
-            if location_data:
-                location = {
-                    "latitude": location_data.get("latitude"),
-                    "longitude": location_data.get("longitude")
-                }
-            
-            # Extract display name
-            display_name = place.get("displayName", {})
-            name = display_name.get("text") if isinstance(display_name, dict) else str(display_name) if display_name else None
-            
-            place_dict = {
-                "place_id": place.get("id"),
-                "name": name,
+        for place in data["places"]:
+            place_info = {
+                "name": place.get("displayName", {}).get("text"),
                 "address": place.get("formattedAddress"),
-                "location": location,
+                "location": place.get("location"),
                 "types": place.get("types", []),
                 "rating": place.get("rating"),
                 "user_rating_count": place.get("userRatingCount"),
                 "phone": place.get("nationalPhoneNumber"),
                 "website": place.get("websiteUri"),
-                "business_status": place.get("businessStatus"),
-                "price_level": place.get("priceLevel")  # PRICE_LEVEL_FREE, PRICE_LEVEL_INEXPENSIVE, etc.
+                "business_status": place.get("businessStatus")
             }
-            
-            places.append(place_dict)
+            places.append(place_info)
         
+        # Cache successful results
+        _text_search_cache[cache_key] = places
+        print(f"Text search found {len(places)} places for '{query}' (cached)")
         return places
         
     except requests.exceptions.RequestException as e:
-        print(f"❌ Error searching nearby places (network/request error): {e}")
+        print(f"Error in text search (network/request error): {e}")
         if hasattr(e, 'response') and e.response is not None:
             try:
                 error_data = e.response.json()
@@ -239,98 +230,7 @@ def search_nearby_places(
                 print(f"   Response status: {e.response.status_code}")
         return None
     except Exception as e:
-        print(f"❌ Error searching nearby places: {e}")
+        print(f"Error in text search: {e}")
         return None
 
-
-if __name__ == "__main__":
-    """
-    Test script for location_tools functions
-    """
-    print("=" * 60)
-    print("Testing location_tools.py functions")
-    print("=" * 60)
-    
-    # Test 1: Check API key
-    print("\n[Test 1] Checking API key...")
-    api_key = get_google_api_key()
-    if api_key:
-        print(f"✅ API key found: {api_key[:10]}...")
-    else:
-        print("❌ API key not found!")
-        print("   Set GOOGLE_PLACES_API_KEY or GOOGLE_MAPS_API_KEY in .env")
-        exit(1)
-    
-    # Test 2: Geocode an address
-    print("\n[Test 2] Testing geocode_address_google...")
-    test_address = "Dallas, TX"
-    print(f"   Geocoding: {test_address}")
-    geocode_result = geocode_address_google(test_address)
-    if geocode_result:
-        print(f"✅ Geocoding successful:")
-        print(f"   Address: {geocode_result.get('formatted_address')}")
-        print(f"   Location: ({geocode_result.get('latitude')}, {geocode_result.get('longitude')})")
-        test_lat = geocode_result.get('latitude')
-        test_lng = geocode_result.get('longitude')
-    else:
-        print("❌ Geocoding failed!")
-        # Use default Dallas coordinates for nearby search test
-        test_lat = 32.7767
-        test_lng = -96.7970
-        print(f"   Using default coordinates: ({test_lat}, {test_lng})")
-    
-    # Test 3: Nearby search - all types
-    print("\n[Test 3] Testing search_nearby_places (all types, 1km radius)...")
-    print(f"   Searching near: ({test_lat}, {test_lng})")
-    nearby_results = search_nearby_places(
-        latitude=test_lat,
-        longitude=test_lng,
-        radius=1000,  # 1km
-        max_results=5
-    )
-    if nearby_results:
-        print(f"✅ Found {len(nearby_results)} places:")
-        for i, place in enumerate(nearby_results[:3], 1):  # Show first 3
-            print(f"   {i}. {place.get('name')} - {place.get('address', 'No address')}")
-            if place.get('types'):
-                print(f"      Types: {', '.join(place.get('types', [])[:3])}")
-    else:
-        print("❌ Nearby search failed!")
-    
-    # Test 4: Nearby search - filtered by type
-    print("\n[Test 4] Testing search_nearby_places (filtered by type: 'hospital')...")
-    nearby_hospitals = search_nearby_places(
-        latitude=test_lat,
-        longitude=test_lng,
-        radius=5000,  # 5km
-        included_types=["hospital"],
-        max_results=5
-    )
-    if nearby_hospitals:
-        print(f"✅ Found {len(nearby_hospitals)} hospitals:")
-        for i, place in enumerate(nearby_hospitals[:3], 1):
-            print(f"   {i}. {place.get('name')} - {place.get('address', 'No address')}")
-    else:
-        print("❌ Hospital search failed!")
-    
-    # Test 5: Nearby search - ranked by popularity
-    print("\n[Test 5] Testing search_nearby_places (ranked by popularity)...")
-    popular_places = search_nearby_places(
-        latitude=test_lat,
-        longitude=test_lng,
-        radius=2000,
-        max_results=5,
-        rank_by="POPULARITY"
-    )
-    if popular_places:
-        print(f"✅ Found {len(popular_places)} popular places:")
-        for i, place in enumerate(popular_places[:3], 1):
-            rating = place.get('rating', 'N/A')
-            print(f"   {i}. {place.get('name')} (Rating: {rating})")
-    else:
-        print("❌ Popular places search failed!")
-    
-    print("\n" + "=" * 60)
-    print("Testing complete!")
-    print("=" * 60)
 
