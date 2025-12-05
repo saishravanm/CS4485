@@ -47,9 +47,9 @@ async def get_user_location(timeout: int = 30) -> Optional[tuple[float, float]]:
     """
     token = str(uuid.uuid4())
     
-    # Send trigger to frontend
+    # Send trigger (hidden) with user-friendly message
     await cl.Message(
-        content=f'<location_request_trigger token="{token}">REQUEST_LOCATION</location_request_trigger>',
+        content=f'<span style="display:none"><location_request_trigger token="{token}"></location_request_trigger></span>📍 Please click "Allow" to share your location.',
         author="System"
     ).send()
     
