@@ -34,15 +34,16 @@ from location_tools_langchain import (
 from location_store import store_session_location, clear_session_location, geocode_and_store
 
 region_name = "us-east-1"
-current_llm_message = ""
 dynamodb = boto3.resource("dynamodb", region_name=region_name)
 global_session_id = "" 
 
+#define data layer
 class CustomDataLayer(cl_data.BaseDataLayer):
+    
+    #store feedback in database
     async def upsert_feedback(self, feedback):
         feedback_table = dynamodb.Table("user_feedback")
         data = {
-         "llm_message":current_llm_message,
          "sentiment":feedback.value,
          "feedback":feedback.comment,   
         }
@@ -92,19 +93,13 @@ class CustomDataLayer(cl_data.BaseDataLayer):
         return await super().list_threads(pagination, filters)
     async def update_step(self, step_dict):
         return await super().update_step(step_dict)
-    async def update_thread(self, thread_id, name = None, user_id = None, metadata = None, tags = None):
+    async def update_thread(self, thread_id, name = None, user_id = global_session_id, metadata = {}, tags = None):
         return await super().update_thread(thread_id, name, user_id, metadata, tags)
 
 cl_data._data_layer=CustomDataLayer()
 
-@cl.on_message
-async def on_starter(message: cl.Message):
-    print(message.content)
-    if message.content == "Emergency":
-        await cl.Message("If you are currently in an emergency, please call 911.\n Crisis Hotline: 988, Homeless Hotline: (555) 211-HELP, Domestic Violence Hotline: (555) 799-SAFE").send()
-    else:
-        main(message)
 
+#define starter messages
 @cl.set_starters
 async def set_starters():
     return [
@@ -158,6 +153,7 @@ def get_session_history(session_id):
         boto3_session=session,
     )
 
+
 def remove_PII(text):
     #language_response = comprehend_client.detect_dominant_language(Text=text).json()
     #language = language_response['']
@@ -166,7 +162,8 @@ def remove_PII(text):
         region_name=region_name
     )
     language_code = comprehend_client.detect_dominant_language(Text=text)['Languages'][0]['LanguageCode']
-    print(language_code)
+    #print(language_code)
+    #set default language to english if it isn't Spanish (to remove PII)
     if language_code != "en" or language_code != "es":
         language_code = "en"
     response = comprehend_client.detect_pii_entities(Text=text,LanguageCode=language_code)
@@ -175,7 +172,7 @@ def remove_PII(text):
         if entity['Type'] == 'ADDRESS' or entity['Type'] == "PHONE" or entity['Type'] == "NAME":
             pass
         else:
-            print(entity['Type'])
+            #print(entity['Type'])
             for i in range(entity['BeginOffset'],entity['EndOffset']):
                 redacted_text[i] = '*'
     redacted_text = "".join(redacted_text)
@@ -190,9 +187,9 @@ async def on_set_location(action: cl.Action):
     Receives location coordinates from location.js and stores in user session
     """
     try:
-        print(f"Action received: {action.name}")
-        print(f"Action payload: {action.payload}")
-        print(f"Action payload type: {type(action.payload)}")
+        #print(f"Action received: {action.name}")
+        #print(f"Action payload: {action.payload}")
+        #print(f"Action payload type: {type(action.payload)}")
         
         # Handle different payload formats
         if isinstance(action.payload, dict):
@@ -203,7 +200,7 @@ async def on_set_location(action: cl.Action):
             latitude = getattr(action.payload, "latitude", None)
             longitude = getattr(action.payload, "longitude", None)
         
-        print(f"Extracted - Latitude: {latitude}, Longitude: {longitude}")
+        #print(f"Extracted - Latitude: {latitude}, Longitude: {longitude}")
         
         if latitude is not None and longitude is not None:
             # Convert to float if they're strings
@@ -211,17 +208,15 @@ async def on_set_location(action: cl.Action):
                 latitude = float(latitude)
                 longitude = float(longitude)
             except (ValueError, TypeError) as e:
-                print(f"Could not convert to float: {e}")
+                #print(f"Could not convert to float: {e}")
                 return
             
             cl.user_session.set("user_latitude", latitude)
             cl.user_session.set("user_longitude", longitude)
-            print(f"Location received and stored: ({latitude}, {longitude})")
-        else:
-            print(f"Invalid location payload: {action.payload}")
-            print(f"Latitude: {latitude}, Longitude: {longitude}")
+            #print(f"Location received and stored: ({latitude}, {longitude})")
+    
     except Exception as e:
-        print(f"Error handling location action: {e}")
+        #print(f"Error handling location action: {e}")
         import traceback
         traceback.print_exc()
 
@@ -229,34 +224,26 @@ async def on_set_location(action: cl.Action):
 async def init():
     # Reset location state for new session
     reset_location_state()
-    
-    # Generate user session id for the session
-    session_id = str(uuid.uuid4())
-    cl.user_session.set("id", session_id)
-    print(f"New session started: {session_id}")
+    # get user session id for the session
+    session_id = cl.user_session.get("id")
     global global_session_id
     global_session_id = session_id
+    
     #define region
     cl.user_session.set("region_name",region_name)
     
-    # Initialize location storage (will be set by action callback)
+    #Initialize location storage (will be set by action callback)
     cl.user_session.set("user_latitude", None)
     cl.user_session.set("user_longitude", None)
-    print("Location session variables initialized")
-#create dynamodb instance
-    sts_client = boto3.client(
-        'sts',
-        region_name=region_name
-    )
-    
+    #print("Location session variables initialized")    
 
-# Create Bedrock client first
+    #Create Bedrock client first
     bedrock_client = boto3.client(
         service_name="bedrock-runtime",
         region_name=region_name,
     )
 
-# Create the Bedrock model instance (main agent)
+    #Create the Bedrock model instance (main agent)
     model = ChatBedrockConverse(
         model_id="amazon.nova-lite-v1:0",
         client=bedrock_client,
@@ -265,7 +252,8 @@ async def init():
     
     
     tools = []
-    # Create boto3 session with credentials
+    
+    #Create boto3 session with credentials
     session = boto3.Session(
         region_name=region_name
     )
@@ -275,28 +263,31 @@ async def init():
         boto3_session=session
     )
 
-##define tools
+    #define tools
     os.environ["TAVILY_API_KEY"] = get_secret_key("tavapikey")["TAVILY_API_KEY"]
-    # Use TavilySearch for web search
+    
+    #Use TavilySearch for web search
     search_tool = TavilySearch(
             max_results=5,
             topic="general",
             search_depth="advanced"
     )
     
+    #define KB retrieval settings
     retriever = AmazonKnowledgeBasesRetriever(
         knowledge_base_id="VWS7WOM9RG",
         retrieval_config={"vectorSearchConfiguration": {"numberOfResults": 4}},
         region_name=region_name
     )
     
+    #create retriever tool to get information from KB
     kb_tool = create_retriever_tool(
         retriever,
         "KnowledgeBaseSearch",
         "Searches for homeless resources and retrieves from Bedrock Knowledge Base. In order to return the response in the user selected language, specify using (Generate the answer in [USER_SPECIFIED_LANGUAGE]). So for example, if the user asks something in Spanish, you MUST include (Generate the answer in Spanish) in the query when calling the tool. The resources found must all be free, and/or of a low-cost if possible. "
     )
 
-# Append tools - NO location tools, those are handled automatically
+    #Append tools - NO location tools, those are handled automatically
     tools.append(kb_tool)
     tools.append(search_tool)
 
@@ -350,6 +341,7 @@ LOCATION HANDLING:
 """
 
 
+    #create primary langchain agent
     agent_prompt = ChatPromptTemplate.from_messages(
             [
                 ("system", system_prompt),
@@ -358,20 +350,21 @@ LOCATION HANDLING:
                 ("system", "{agent_scratchpad}")
             ]
     )   
-#defining cleaning prompt
+    #defining cleaning prompt
     cleaning_prompt = ChatPromptTemplate.from_template(
             "Here is the agent's response:\n\n{agent_response}\n\n"
             "Extract and return ONLY the final user-facing answer, so remove all thinking, internal thoughts, processing, and debug info. Don't include any of your thinking either like \"here is the final answer\". Omit any characters (whether it's empty newline characters etc) that make the response less clear or messy to the user. Return it in properly formatted markdown (NO MARKDOWN BOX WITH PLAIN_TEXT) that can render neatly in a Chainlit frontend (similar to chatgpt). Generate the final answer in the language that is in the 'question': 'QUESTION' field of the Agent response. For example, if the language that the question is in is Spanish, generate the answer you return in Spanish, which includes all resource descriptions and pretty much the entire text you get into Spanish (other than links). Make sure the output is in a clearly formatted text, not markdown or anything else."
     )
 
-#define primary agent
+    #define primary agent
     internet_agent = create_tool_calling_agent(
             llm=model,
             tools=tools,
             prompt=agent_prompt
     )
     memory = ConversationBufferMemory(chat_memory=history,memory_key="history",return_messages=True)
-#define agent executor with proper error handling and iteration limits
+    
+    #define agent executor with proper error handling and iteration limits
     agent_executor = AgentExecutor(
             agent=internet_agent,
             tools=tools,
@@ -387,7 +380,7 @@ LOCATION HANDLING:
     cleaning_chain = cleaning_prompt | model | output_parser
 #agent_chain = agent_prompt | model | output_parser
 
-# Wrap the chain with message history functionality
+#Wrap the chain with the message history
     agent_with_history = RunnableWithMessageHistory(
         runnable=agent_executor,
         get_session_history=get_session_history,
@@ -502,7 +495,7 @@ def detect_location_query(text: str, model=None) -> tuple[bool, Optional[str], O
     if not search_term or len(search_term) < 2:
         search_term = None
     
-    print(f"DEBUG: Location query detected - near_me={is_near_me}, search='{search_term}', address={user_address}")
+    #print(f"DEBUG: Location query detected - near_me={is_near_me}, search='{search_term}', address={user_address}")
     return (True, search_term, user_address)
 
 
@@ -517,12 +510,12 @@ async def main(message: cl.Message):
     config = {"configurable": {"session_id": session_id}}
     
     try:
-        print(f"DEBUG: User message: {message.content}")
+        #print(f"DEBUG: User message: {message.content}")
+        
+        #if Emergency option selected (or typed) return emergency numbers
         if message.content == "Emergency":
             await cl.Message("Emergency Number List: \n911\n Crisis Hotline: 988 \n Homeless Hotline: (555) 211-HELP \nDomestic Violence Hotline: (555) 799-SAFE \n Disaster Distress Helpline 1-800-985-5990 \n National Maternal Mental Health Hotline 1-833-TLC-MAMA (1-833-852-6262) \n Poison Help Hotline 1-800-222-1222 \nSubstance Abuse and Mental Health Services Administration’s National Helpline 1-800-662-HELP (1-800-622-4357) ").send()
-            
-        #get the PII removed text
-        
+                    
         # Get the PII removed text
         pii_removed_message = remove_PII(message.content)
         
@@ -530,7 +523,7 @@ async def main(message: cl.Message):
         
         # Check if we're waiting for an address (GPS failed, user providing location)
         if is_waiting_for_address(session_id):
-            print(f"DEBUG: Waiting for address - treating message as location")
+            #print(f"DEBUG: Waiting for address - treating message as location")
             pending_query = get_pending_query(session_id)
             
             # Try to geocode the user's message as an address
@@ -538,11 +531,11 @@ async def main(message: cl.Message):
             
             if geocode_result:
                 lat, lng = geocode_result
-                print(f"DEBUG: Geocoded address to ({lat}, {lng})")
+                #print(f"DEBUG: Geocoded address to ({lat}, {lng})")
                 
                 # Now search with the pending query
                 search_term = pending_query or "resources"
-                print(f"DEBUG: Searching for '{search_term}' at ({lat}, {lng})")
+                #print(f"DEBUG: Searching for '{search_term}' at ({lat}, {lng})")
                 search_result = search_resources(session_id, search_term)
                 
                 # Clear pending query
@@ -574,7 +567,7 @@ async def main(message: cl.Message):
         is_location_query, search_query, user_address = detect_location_query(pii_removed_message)
         
         if is_location_query:
-            print(f"DEBUG: Location query detected - query: '{search_query}', address: {user_address}")
+            #print(f"DEBUG: Location query detected - query: '{search_query}', address: {user_address}")
             
             # Ensure we have a location
             location_result = await ensure_location(session_id, user_address)
@@ -591,7 +584,7 @@ async def main(message: cl.Message):
             
             # We have a location - search using natural language query
             search_term = search_query or "resources"  # Default if no query extracted
-            print(f"DEBUG: Searching for '{search_term}' at ({location_result['lat']}, {location_result['lng']})")
+            #print(f"DEBUG: Searching for '{search_term}' at ({location_result['lat']}, {location_result['lng']})")
             search_result = search_resources(session_id, search_term)
             
             if search_result["status"] == "success":
@@ -616,16 +609,15 @@ async def main(message: cl.Message):
         else:
             # Not a location query - use the agent normally
             response = await agent_with_history.ainvoke({"question": str(pii_removed_message)}, config=config)
-            print(f"DEBUG: Agent response: {response}")
+            #print(f"DEBUG: Agent response: {response}")
             
+            #get the cleaned_response and print it
             cleaned_response = cleaning_chain.invoke({"agent_response": str(response)})
-            print(f"DEBUG: Cleaned response: {cleaned_response}")
-            global current_llm_message
-            current_llm_message = cleaned_response
+            #print(f"DEBUG: Cleaned response: {cleaned_response}")
             await cl.Message(content=cleaned_response).send()
         
     except Exception as e:
-        print(f"DEBUG: Error occurred: {str(e)}")
+        #print(f"DEBUG: Error occurred: {str(e)}")
         import traceback
         traceback.print_exc()
         await cl.Message(content=f"I'm sorry, I encountered an error. Please try again or rephrase your question.").send()
@@ -634,9 +626,8 @@ async def main(message: cl.Message):
 # Implement function to delete history after session ends (user refreshes or clicks off)
 @cl.on_chat_end
 def deleteHistory():
-    user_id = cl.user_session.get('id')
+    user_id = cl.user_session.get("id")
     region_name = cl.user_session.get('region_name')
-    
     # Clear session location and state
     if user_id:
         clear_session_location(str(user_id))
